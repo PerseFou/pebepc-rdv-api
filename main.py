@@ -250,7 +250,6 @@ async def send_draft(
         logging.info(f"send_draft: event_id={event_id}, token={token}, fichier={pdf.filename}")
 
         pdf_bytes = await pdf.read()
-        pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
 
         models.execute_kw(
             ODOO_DB, uid, ODOO_PASSWORD,
@@ -258,7 +257,7 @@ async def send_draft(
             [{
                 "name": pdf.filename or "PEB_provisoire.pdf",
                 "type": "binary",
-                "datas": pdf_b64,
+                "raw": pdf_bytes,
                 "res_model": "calendar.event",
                 "res_id": event_id,
                 "mimetype": "application/pdf"
@@ -280,174 +279,6 @@ async def send_draft(
     except Exception as e:
         logging.error(f"send_draft error: {e}")
         return {"success": False, "error": str(e)}
-
-
-# ── PAGE CLIENT ────────────────────────────────────────────
-
-@app.get("/rdv-client", response_class=HTMLResponse)
-def rdv_client(token: str = ""):
-    if not token:
-        return HTMLResponse("<h2>Lien invalide.</h2>", status_code=400)
-    html = f"""<!DOCTYPE html>
-<html lang="fr">
-<head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Votre PEB provisoire</title>
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;600;700;800;900&display=swap');
-*{{box-sizing:border-box;margin:0;padding:0}}
-body{{font-family:'Inter Tight',sans-serif;background:#f4f6fb;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}}
-.card{{background:#fff;border-radius:20px;box-shadow:0 8px 40px rgba(27,58,140,0.13);width:100%;max-width:640px;overflow:hidden}}
-.card-head{{background:linear-gradient(135deg,#1B3A8C,#3B82F6);padding:28px 32px;color:#fff}}
-.card-head h1{{font-size:1.4rem;font-weight:900;margin-bottom:4px}}
-.card-head p{{font-size:0.82rem;opacity:0.75;font-weight:600}}
-.card-body{{padding:28px 32px;display:flex;flex-direction:column;gap:20px}}
-.info-grid{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}
-.info-item label{{font-size:0.62rem;font-weight:800;text-transform:uppercase;letter-spacing:0.1em;color:#8a9bb5;display:block;margin-bottom:3px}}
-.info-item span{{font-size:0.9rem;font-weight:700;color:#1B3A8C}}
-.pdf-frame{{width:100%;height:420px;border:1.5px solid rgba(27,58,140,0.13);border-radius:12px;background:#f8faff}}
-.pdf-fallback{{display:none;padding:20px;text-align:center;background:#f8faff;border-radius:12px;border:1.5px solid rgba(27,58,140,0.13)}}
-.pdf-fallback a{{color:#1B3A8C;font-weight:700;font-size:0.88rem}}
-.actions{{display:flex;gap:12px}}
-.btn{{flex:1;padding:14px;border-radius:12px;border:none;font-size:0.9rem;font-weight:800;cursor:pointer;font-family:'Inter Tight',sans-serif;transition:all 0.18s}}
-.btn-accept{{background:#10B981;color:#fff}}
-.btn-accept:hover{{background:#059669}}
-.btn-refuse{{background:#fff;color:#EF4444;border:2px solid #EF4444}}
-.btn-refuse:hover{{background:#EF4444;color:#fff}}
-.refuse-box{{display:none;flex-direction:column;gap:10px}}
-.refuse-box textarea{{width:100%;padding:12px;border-radius:10px;border:1.5px solid rgba(27,58,140,0.2);font-family:'Inter Tight',sans-serif;font-size:0.84rem;resize:vertical;min-height:90px;outline:none}}
-.refuse-box textarea:focus{{border-color:#1B3A8C}}
-.btn-confirm-refuse{{background:#EF4444;color:#fff;padding:12px;border-radius:10px;border:none;font-size:0.88rem;font-weight:800;cursor:pointer;font-family:'Inter Tight',sans-serif}}
-.btn-confirm-refuse:hover{{background:#DC2626}}
-.result{{display:none;padding:20px;border-radius:12px;text-align:center;font-weight:800;font-size:1rem}}
-.result.success{{background:#f0fdf4;color:#16a34a;border:1.5px solid #bbf7d0}}
-.result.error{{background:#fef2f2;color:#dc2626;border:1.5px solid #fecaca}}
-.loader{{text-align:center;padding:40px;color:#8a9bb5;font-weight:700}}
-@media(max-width:500px){{
-  .card-head,.card-body{{padding:20px}}
-  .info-grid{{grid-template-columns:1fr}}
-  .pdf-frame{{height:280px}}
-}}
-</style>
-</head>
-<body>
-<div class="card">
-  <div class="card-head">
-    <h1>📄 Votre PEB provisoire</h1>
-    <p>Veuillez consulter le document ci-dessous puis accepter ou refuser.</p>
-  </div>
-  <div class="card-body" id="main-body">
-    <div class="loader" id="loader">Chargement de votre mission…</div>
-  </div>
-</div>
-
-<script>
-var TOKEN = "{token}";
-var API   = "{RAILWAY_URL}";
-
-fetch(API + '/pebepc/mission/' + TOKEN)
-  .then(function(r){{ return r.json(); }})
-  .then(function(data){{
-    var body = document.getElementById('main-body');
-    document.getElementById('loader').remove();
-
-    if (!data.success) {{
-      body.innerHTML = '<div class="result error" style="display:block">❌ Mission introuvable ou lien invalide.</div>';
-      return;
-    }}
-
-    var m = data.mission;
-
-    if (m.statut === 'draft_accepted') {{
-      body.innerHTML = '<div class="result success" style="display:block">✓ Vous avez déjà accepté ce PEB provisoire. Merci !</div>';
-      return;
-    }}
-    if (m.statut === 'draft_refused') {{
-      body.innerHTML = '<div class="result error" style="display:block">Vous avez déjà refusé ce PEB provisoire. L\'expert a été notifié.</div>';
-      return;
-    }}
-
-    var infoGrid = '<div class="info-grid">'
-      + '<div class="info-item"><label>Adresse du bien</label><span>' + (m.adresse||'—') + '</span></div>'
-      + '<div class="info-item"><label>Type de bien</label><span>' + (m.type_bien||'—') + '</span></div>'
-      + '<div class="info-item"><label>Superficie</label><span>' + (m.superficie||'—') + '</span></div>'
-      + '<div class="info-item"><label>Mandataire</label><span>' + (m.client_nom||'—') + '</span></div>'
-      + '</div>';
-
-    var pdfUrl = API + '/pebepc/mission/' + TOKEN + '/pdf';
-
-    body.innerHTML = infoGrid
-      + '<iframe class="pdf-frame" id="pdf-frame" src="' + pdfUrl + '" title="PEB provisoire"></iframe>'
-      + '<div class="pdf-fallback" id="pdf-fallback"><p style="margin-bottom:8px;color:#8a9bb5;font-size:0.82rem;">Si le PDF ne s\'affiche pas :</p><a href="' + pdfUrl + '" target="_blank">📥 Télécharger le PDF</a></div>'
-      + '<div class="actions" id="actions">'
-      + '<button class="btn btn-refuse" onclick="showRefuse()">✗ Refuser</button>'
-      + '<button class="btn btn-accept" onclick="doAccept()">✓ Accepter</button>'
-      + '</div>'
-      + '<div class="refuse-box" id="refuse-box">'
-      + '<label style="font-size:0.72rem;font-weight:800;color:#8a9bb5;text-transform:uppercase;letter-spacing:0.08em;">Motif du refus (optionnel)</label>'
-      + '<textarea id="remarques" placeholder="Expliquez pourquoi vous refusez ce PEB provisoire…"></textarea>'
-      + '<button class="btn-confirm-refuse" onclick="doRefuse()">Confirmer le refus</button>'
-      + '</div>'
-      + '<div class="result" id="result"></div>';
-
-    document.getElementById('pdf-frame').addEventListener('error', function(){{
-      document.getElementById('pdf-fallback').style.display = 'block';
-    }});
-  }})
-  .catch(function(){{
-    document.getElementById('loader').innerHTML = '❌ Erreur de chargement. Vérifiez votre connexion.';
-  }});
-
-function showRefuse(){{
-  document.getElementById('actions').style.display   = 'none';
-  document.getElementById('refuse-box').style.display = 'flex';
-}}
-
-function doAccept(){{
-  document.getElementById('actions').style.display = 'none';
-  fetch(API + '/pebepc/mission/' + TOKEN + '/accept', {{method:'POST'}})
-    .then(function(r){{ return r.json(); }})
-    .then(function(d){{
-      var el = document.getElementById('result');
-      el.style.display = 'block';
-      if (d.success){{
-        el.className = 'result success';
-        el.innerHTML = '✓ Merci ! Vous avez accepté le PEB provisoire. L\'expert va maintenant préparer la version définitive.';
-      }} else {{
-        el.className = 'result error';
-        el.innerHTML = '❌ Erreur : ' + (d.error||'');
-        document.getElementById('actions').style.display = 'flex';
-      }}
-    }});
-}}
-
-function doRefuse(){{
-  var remarques = document.getElementById('remarques').value.trim();
-  document.getElementById('refuse-box').style.display = 'none';
-  fetch(API + '/pebepc/mission/' + TOKEN + '/refuse', {{
-    method: 'POST',
-    headers: {{'Content-Type':'application/json'}},
-    body: JSON.stringify({{remarques: remarques}})
-  }})
-    .then(function(r){{ return r.json(); }})
-    .then(function(d){{
-      var el = document.getElementById('result');
-      el.style.display = 'block';
-      if (d.success){{
-        el.className = 'result error';
-        el.innerHTML = '↩ Refus enregistré. L\'expert a été notifié et va corriger le PEB provisoire.';
-      }} else {{
-        el.className = 'result error';
-        el.innerHTML = '❌ Erreur : ' + (d.error||'');
-        document.getElementById('refuse-box').style.display = 'flex';
-      }}
-    }});
-}}
-</script>
-</body>
-</html>"""
-    return HTMLResponse(html)
 
 
 @app.get("/pebepc/mission/{token}/pdf")
@@ -474,12 +305,12 @@ def get_pdf(token: str):
                 ["res_id", "=", event_id],
                 ["mimetype", "=", "application/pdf"]
             ]],
-            {"fields": ["id", "name", "datas"], "limit": 1, "order": "id desc"}
+            {"fields": ["id", "name", "raw"], "limit": 1, "order": "id desc"}
         )
         if not attachments:
             return Response(content=b"PDF introuvable", status_code=404)
 
-        pdf_bytes = base64.b64decode(attachments[0]["datas"])
+        pdf_bytes = attachments[0]["raw"]
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",
