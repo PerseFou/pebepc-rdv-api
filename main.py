@@ -453,7 +453,7 @@ def get_pdf_definitif(token: str):
         pdf_b64 = ev.get("x_studio_pdf_definitif")
 
         if not pdf_b64:
-            return Response(content=b"Aucun PDF définitif disponible", status_code=404)
+            return Response(content="Aucun PDF définitif disponible", status_code=404)
 
         pdf_bytes = base64.b64decode(pdf_b64)
         filename  = f"PEB_definitif_{ev['id']}.pdf"
