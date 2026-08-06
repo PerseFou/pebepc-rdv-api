@@ -4,10 +4,9 @@ import logging
 import secrets
 import re
 import base64
-import requests as req_lib
 from fastapi import FastAPI, Form, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, RedirectResponse
+from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import Optional
 
@@ -91,7 +90,7 @@ def send_odoo_mail(uid, models, email_to, subject, body_html):
             "mail.mail", "send",
             [[mail_id]]
         )
-        logging.info(f"Mail envoyé à {email_to} — sujet: {subject}")
+        logging.info(f"Mail envoyé à {email_to}")
         return True
     except Exception as e:
         logging.error(f"Erreur envoi mail: {e}")
@@ -135,7 +134,7 @@ class RefuseRequest(BaseModel):
     remarques: Optional[str] = ""
 
 
-# ── ENDPOINTS ──────────────────────────────────────────────
+# ── ENDPOINTS RDV ──────────────────────────────────────────
 
 @app.get("/")
 def root():
@@ -149,19 +148,11 @@ def taken_slots(req: TakenSlotsRequest):
         events = models.execute_kw(
             ODOO_DB, uid, ODOO_PASSWORD,
             "calendar.event", "search_read",
-            [[
-                ["start", ">=", req.start],
-                ["stop",  "<=", req.stop],
-                ["active", "=", True]
-            ]],
+            [[["start", ">=", req.start], ["stop", "<=", req.stop], ["active", "=", True]]],
             {"fields": ["start", "stop"], "limit": 500}
         )
         logging.info(f"taken_slots: {len(events)} événements trouvés")
-        slots = [
-            {"start": e["start"], "stop": e["stop"], "expertEmail": ODOO_USER}
-            for e in (events or [])
-        ]
-        return {"slots": slots}
+        return {"slots": [{"start": e["start"], "stop": e["stop"], "expertEmail": ODOO_USER} for e in (events or [])]}
     except Exception as e:
         logging.error(f"taken_slots error: {e}")
         return {"slots": []}
@@ -174,35 +165,17 @@ def submit_rdv(req: SubmitRequest):
         uid, models = odoo_connect()
 
         def find_or_create_partner(email, name, phone=""):
-            existing = models.execute_kw(
-                ODOO_DB, uid, ODOO_PASSWORD,
-                "res.partner", "search_read",
-                [[["email", "=", email]]],
-                {"fields": ["id"], "limit": 1}
-            )
-            if existing:
-                return existing[0]["id"]
-            return models.execute_kw(
-                ODOO_DB, uid, ODOO_PASSWORD,
-                "res.partner", "create",
-                [{"name": name, "email": email, "phone": phone}]
-            )
+            existing = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.partner", "search_read", [[["email", "=", email]]], {"fields": ["id"], "limit": 1})
+            if existing: return existing[0]["id"]
+            return models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.partner", "create", [{"name": name, "email": email, "phone": phone}])
 
         expert_id = find_or_create_partner(ODOO_USER, EXPERT_NAME)
         client_id = find_or_create_partner(req.email, f"{req.prenom} {req.nom}", req.tel)
-
         place_id = None
         if req.contact_place_email:
-            place_id = find_or_create_partner(
-                req.contact_place_email,
-                req.contact_place_nom or req.contact_place_email,
-                req.contact_place_tel
-            )
+            place_id = find_or_create_partner(req.contact_place_email, req.contact_place_nom or req.contact_place_email, req.contact_place_tel)
 
-        adresse = req.rue
-        if req.boite:
-            adresse += f", {req.boite}"
-        adresse += f", {req.cp} {req.ville}"
+        adresse = req.rue + (f", {req.boite}" if req.boite else "") + f", {req.cp} {req.ville}"
 
         gestion = req.gestion_type or ""
         x_infos = "AGENCE\n" if gestion == "Agence" else "PROPRIÉTAIRE\n"
@@ -212,35 +185,22 @@ def submit_rdv(req: SubmitRequest):
         x_infos += f"\nBIEN\nType : {req.type_bien}\nSuperficie : {req.superficie}"
         x_infos += f"\n\nMANDATAIRE\nNom : {req.prenom} {req.nom}\nTél : {req.tel}\nEmail : {req.email}"
 
-        title = f"PEB — {req.type_bien} {req.superficie} — {adresse}"
-
         partner_ids = [expert_id]
-        if client_id and client_id != expert_id:
-            partner_ids.append(client_id)
-        if place_id and place_id not in partner_ids:
-            partner_ids.append(place_id)
+        if client_id and client_id != expert_id: partner_ids.append(client_id)
+        if place_id and place_id not in partner_ids: partner_ids.append(place_id)
 
-        event_id = models.execute_kw(
-            ODOO_DB, uid, ODOO_PASSWORD,
-            "calendar.event", "create",
-            [{
-                "name": title,
-                "start": req.start_utc,
-                "stop": req.stop_utc,
-                "description": f"Créneau : {req.creneau_label}\nAdresse : {adresse}\n\n{x_infos}",
-                "partner_ids": [[6, 0, partner_ids]]
-            }]
-        )
+        event_id = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "create", [{
+            "name": f"PEB — {req.type_bien} {req.superficie} — {adresse}",
+            "start": req.start_utc, "stop": req.stop_utc,
+            "description": f"Créneau : {req.creneau_label}\nAdresse : {adresse}\n\n{x_infos}",
+            "partner_ids": [[6, 0, partner_ids]]
+        }])
 
         try:
-            models.execute_kw(
-                ODOO_DB, uid, ODOO_PASSWORD,
-                "calendar.event", "write",
-                [[event_id], {
-                    "x_studio_adresse_du_bien": adresse,
-                    "x_studio_informations_sur_le_bien": x_infos
-                }]
-            )
+            models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "write", [[event_id], {
+                "x_studio_adresse_du_bien": adresse,
+                "x_studio_informations_sur_le_bien": x_infos
+            }])
         except Exception as e:
             logging.warning(f"Champs studio event: {e}")
 
@@ -248,35 +208,17 @@ def submit_rdv(req: SubmitRequest):
         if req.prix and req.prix > 0:
             try:
                 htva = round(req.prix / 1.21, 2)
-                taxes = models.execute_kw(
-                    ODOO_DB, uid, ODOO_PASSWORD,
-                    "account.tax", "search_read",
-                    [[["amount", "=", 21], ["type_tax_use", "=", "sale"], ["active", "=", True]]],
-                    {"fields": ["id"], "limit": 1}
-                )
+                taxes = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "account.tax", "search_read",
+                    [[["amount", "=", 21], ["type_tax_use", "=", "sale"], ["active", "=", True]]], {"fields": ["id"], "limit": 1})
                 tax_ids = [[4, taxes[0]["id"]]] if taxes else []
-                invoice_id = models.execute_kw(
-                    ODOO_DB, uid, ODOO_PASSWORD,
-                    "account.move", "create",
-                    [{
-                        "move_type": "out_invoice",
-                        "partner_id": client_id,
-                        "invoice_line_ids": [[0, 0, {
-                            "name": f"Certification PEB — {req.type_bien} {req.superficie} — {adresse}",
-                            "quantity": 1,
-                            "price_unit": htva,
-                            "tax_ids": tax_ids
-                        }]]
-                    }]
-                )
-                try:
-                    models.execute_kw(
-                        ODOO_DB, uid, ODOO_PASSWORD,
-                        "calendar.event", "write",
-                        [[event_id], {"x_studio_facture_liee": invoice_id}]
-                    )
-                except Exception as e:
-                    logging.warning(f"Lien facture-event: {e}")
+                invoice_id = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "account.move", "create", [{
+                    "move_type": "out_invoice", "partner_id": client_id,
+                    "invoice_line_ids": [[0, 0, {
+                        "name": f"Certification PEB — {req.type_bien} {req.superficie} — {adresse}",
+                        "quantity": 1, "price_unit": htva, "tax_ids": tax_ids
+                    }]]
+                }])
+                models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "write", [[event_id], {"x_studio_facture_liee": invoice_id}])
             except Exception as e:
                 logging.warning(f"Création facture: {e}")
 
@@ -294,45 +236,43 @@ async def send_draft(
     event_id: int = Form(...),
     pdf: UploadFile = File(...)
 ):
+    """
+    1. Lit le PDF uploadé
+    2. Encode en base64 et le stocke dans x_studio_pdf_provisoire via XML-RPC
+    3. Génère un token unique
+    4. Met le statut à draft_sent
+    5. Envoie un mail au mandataire avec le lien
+    """
     try:
         uid, models = odoo_connect()
         token = secrets.token_urlsafe(24)
         logging.info(f"send_draft: event_id={event_id}, token={token}, fichier={pdf.filename}")
 
         pdf_bytes = await pdf.read()
-        pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+        pdf_b64   = base64.b64encode(pdf_bytes).decode("utf-8")
+        logging.info(f"PDF lu: {len(pdf_bytes)} octets")
 
-        models.execute_kw(
-            ODOO_DB, uid, ODOO_PASSWORD,
-            "ir.attachment", "create",
-            [{
-                "name": pdf.filename or "PEB_provisoire.pdf",
-                "type": "binary",
-                "datas": pdf_b64,
-                "res_model": "calendar.event",
-                "res_id": event_id,
-                "mimetype": "application/pdf"
-            }]
-        )
-        logging.info("PDF provisoire attaché à l'événement Odoo")
-
+        # ✅ Stocker le PDF en base64 dans Odoo via XML-RPC (pas de HTTP)
         models.execute_kw(
             ODOO_DB, uid, ODOO_PASSWORD,
             "calendar.event", "write",
             [[event_id], {
-                "x_studio_client_token": token,
-                "x_studio_statut_draft": "draft_sent"
+                "x_studio_client_token":   token,
+                "x_studio_statut_draft":   "draft_sent",
+                "x_studio_pdf_provisoire": pdf_b64
             }]
         )
+        logging.info("PDF provisoire + token écrits dans Odoo")
 
-        infos = get_mission_info(uid, models, event_id)
+        # Récupérer infos mandataire pour le mail
+        infos        = get_mission_info(uid, models, event_id)
         client_email = infos.get("email", "")
         client_nom   = infos.get("nom", "le mandataire")
         adresse      = infos.get("adresse", "")
         client_link  = f"https://peb-pulls.odoo.com/rdv-client?token={token}"
 
         if client_email:
-            subject = "Votre PEB provisoire est disponible"
+            subject   = "Votre PEB provisoire est disponible"
             body_html = f"""
 <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
     <div style="background:linear-gradient(135deg,#1B3A8C,#3B82F6);padding:28px 32px;border-radius:12px 12px 0 0;">
@@ -371,49 +311,56 @@ async def send_final(
     event_id: int = Form(...),
     pdf: UploadFile = File(...)
 ):
+    """
+    1. Lit le PDF définitif
+    2. Le stocke dans x_studio_pdf_definitif via XML-RPC
+    3. Met le statut à closed
+    4. Envoie un mail au mandataire avec lien téléchargement
+    """
     try:
         uid, models = odoo_connect()
         logging.info(f"send_final: event_id={event_id}, fichier={pdf.filename}")
 
         pdf_bytes = await pdf.read()
-        pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+        pdf_b64   = base64.b64encode(pdf_bytes).decode("utf-8")
 
-        models.execute_kw(
-            ODOO_DB, uid, ODOO_PASSWORD,
-            "ir.attachment", "create",
-            [{
-                "name": pdf.filename or "PEB_definitif.pdf",
-                "type": "binary",
-                "datas": pdf_b64,
-                "res_model": "calendar.event",
-                "res_id": event_id,
-                "mimetype": "application/pdf"
-            }]
-        )
-        logging.info("PDF définitif attaché à l'événement Odoo")
+        # Stocker le PDF définitif + fermer la mission
+        try:
+            models.execute_kw(
+                ODOO_DB, uid, ODOO_PASSWORD,
+                "calendar.event", "write",
+                [[event_id], {
+                    "x_studio_pdf_definitif": pdf_b64,
+                    "x_studio_statut_draft":  "closed"
+                }]
+            )
+            logging.info("PDF définitif écrit dans Odoo")
+        except Exception as e:
+            # Si le champ x_studio_pdf_definitif n'existe pas encore, on écrit juste le statut
+            logging.warning(f"Champ pdf_definitif manquant, statut seul: {e}")
+            models.execute_kw(
+                ODOO_DB, uid, ODOO_PASSWORD,
+                "calendar.event", "write",
+                [[event_id], {"x_studio_statut_draft": "closed"}]
+            )
 
-        models.execute_kw(
-            ODOO_DB, uid, ODOO_PASSWORD,
-            "calendar.event", "write",
-            [[event_id], {"x_studio_statut_draft": "closed"}]
-        )
-
-        infos = get_mission_info(uid, models, event_id)
+        infos        = get_mission_info(uid, models, event_id)
         client_email = infos.get("email", "")
         client_nom   = infos.get("nom", "le mandataire")
         adresse      = infos.get("adresse", "")
 
-        token_event = models.execute_kw(
+        # Récupérer le token pour le lien PDF
+        token_ev = models.execute_kw(
             ODOO_DB, uid, ODOO_PASSWORD,
             "calendar.event", "read",
             [[event_id]],
             {"fields": ["x_studio_client_token"]}
         )
-        token = token_event[0].get("x_studio_client_token", "") if token_event else ""
-        pdf_link = f"{RAILWAY_URL}/pebepc/mission/{token}/pdf" if token else ""
+        token    = token_ev[0].get("x_studio_client_token", "") if token_ev else ""
+        pdf_link = f"{RAILWAY_URL}/pebepc/mission/{token}/pdf/final" if token else ""
 
         if client_email:
-            subject = "Votre certificat PEB définitif est disponible"
+            subject   = "Votre certificat PEB définitif est disponible"
             body_html = f"""
 <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
     <div style="background:linear-gradient(135deg,#059669,#10B981);padding:28px 32px;border-radius:12px 12px 0 0;">
@@ -427,12 +374,10 @@ async def send_final(
         {"<div style='text-align:center;margin:28px 0;'><a href='" + pdf_link + "' style='background:#10B981;color:#fff;padding:14px 32px;border-radius:999px;text-decoration:none;font-weight:bold;font-size:1rem;'>📥 Télécharger mon certificat PEB →</a></div>" if pdf_link else ""}
         <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;"/>
         <p style="color:#8a9bb5;font-size:0.78rem;">Armine Sotodeh — Expert PEB<br/>
-        <a href="mailto:{ODOO_USER}" style="color:#10B981;">{ODOO_USER}</a></p>
+        <a href="mailto:{ODOO_USER}" style="color:#1B3A8C;">{ODOO_USER}</a></p>
     </div>
 </div>"""
             send_odoo_mail(uid, models, client_email, subject, body_html)
-        else:
-            logging.warning(f"Pas d'email trouvé pour event_id={event_id}")
 
         return {"success": True, "mail_sent": bool(client_email)}
 
@@ -441,8 +386,14 @@ async def send_final(
         return {"success": False, "error": str(e)}
 
 
+# ── SERVIR LE PDF DEPUIS ODOO VIA XML-RPC ─────────────────
+
 @app.get("/pebepc/mission/{token}/pdf")
-def get_pdf(token: str):
+def get_pdf_provisoire(token: str):
+    """
+    Récupère le PDF provisoire depuis le champ x_studio_pdf_provisoire
+    via XML-RPC (pas de HTTP vers Odoo — contourne le blocage SaaS).
+    """
     try:
         uid, models = odoo_connect()
 
@@ -450,112 +401,79 @@ def get_pdf(token: str):
             ODOO_DB, uid, ODOO_PASSWORD,
             "calendar.event", "search_read",
             [[["x_studio_client_token", "=", token], ["active", "=", True]]],
-            {"fields": ["id"], "limit": 1}
+            {"fields": ["id", "name", "x_studio_pdf_provisoire"], "limit": 1}
         )
+
         if not events:
             return Response(content=b"Mission introuvable", status_code=404)
 
-        event_id = events[0]["id"]
+        ev      = events[0]
+        pdf_b64 = ev.get("x_studio_pdf_provisoire")
 
-        attachment_ids = models.execute_kw(
-            ODOO_DB, uid, ODOO_PASSWORD,
-            "ir.attachment", "search",
-            [[
-                ["res_model", "=", "calendar.event"],
-                ["res_id", "=", event_id],
-                ["mimetype", "=", "application/pdf"]
-            ]],
-            {"limit": 1, "order": "id desc"}
+        if not pdf_b64:
+            return Response(content=b"Aucun PDF provisoire disponible", status_code=404)
+
+        pdf_bytes = base64.b64decode(pdf_b64)
+        filename  = f"PEB_provisoire_{ev['id']}.pdf"
+
+        logging.info(f"PDF provisoire servi: {len(pdf_bytes)} octets pour token={token}")
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"inline; filename=\"{filename}\"",
+                "Access-Control-Allow-Origin": "*"
+            }
         )
-        if not attachment_ids:
-            return Response(content=b"PDF introuvable", status_code=404)
-
-        att_id = attachment_ids[0]
-
-        attachments = models.execute_kw(
-            ODOO_DB, uid, ODOO_PASSWORD,
-            "ir.attachment", "read",
-            [[att_id]],
-            {"fields": ["name"]}
-        )
-        att_name = attachments[0]["name"] if attachments else "PEB.pdf"
-
-        # Tentative 1 : basic auth
-        pdf_resp = req_lib.get(
-            f"{ODOO_URL}/web/content/{att_id}",
-            headers={"Authorization": f"Basic {base64.b64encode(f'{ODOO_USER}:{ODOO_PASSWORD}'.encode()).decode()}"},
-            timeout=30,
-            allow_redirects=True
-        )
-        logging.info(f"Tentative 1 basic auth: status={pdf_resp.status_code}, taille={len(pdf_resp.content)}, content-type={pdf_resp.headers.get('content-type','?')}")
-
-        if pdf_resp.status_code == 200 and len(pdf_resp.content) > 100 and b'%PDF' in pdf_resp.content[:10]:
-            logging.info("Tentative 1 OK")
-            return Response(
-                content=pdf_resp.content,
-                media_type="application/pdf",
-                headers={
-                    "Content-Disposition": f"inline; filename=\"{att_name}\"",
-                    "Access-Control-Allow-Origin": "*"
-                }
-            )
-
-        # Tentative 2 : session cookie
-        session = req_lib.Session()
-        auth_resp = session.post(
-            f"{ODOO_URL}/web/session/authenticate",
-            json={
-                "jsonrpc": "2.0", "method": "call", "id": 1,
-                "params": {"db": ODOO_DB, "login": ODOO_USER, "password": ODOO_PASSWORD}
-            },
-            timeout=15
-        )
-        logging.info(f"Tentative 2 auth: status={auth_resp.status_code}, cookies={dict(session.cookies)}")
-
-        pdf_resp2 = session.get(
-            f"{ODOO_URL}/web/content/{att_id}",
-            timeout=30,
-            allow_redirects=True
-        )
-        logging.info(f"Tentative 2 download: status={pdf_resp2.status_code}, taille={len(pdf_resp2.content)}, content-type={pdf_resp2.headers.get('content-type','?')}")
-
-        if pdf_resp2.status_code == 200 and len(pdf_resp2.content) > 100 and b'%PDF' in pdf_resp2.content[:10]:
-            logging.info("Tentative 2 OK")
-            return Response(
-                content=pdf_resp2.content,
-                media_type="application/pdf",
-                headers={
-                    "Content-Disposition": f"inline; filename=\"{att_name}\"",
-                    "Access-Control-Allow-Origin": "*"
-                }
-            )
-
-        # Tentative 3 : params login
-        pdf_resp3 = req_lib.get(
-            f"{ODOO_URL}/web/content/{att_id}",
-            params={"db": ODOO_DB, "login": ODOO_USER, "password": ODOO_PASSWORD},
-            timeout=30
-        )
-        logging.info(f"Tentative 3: status={pdf_resp3.status_code}, taille={len(pdf_resp3.content)}")
-
-        if pdf_resp3.status_code == 200 and len(pdf_resp3.content) > 100 and b'%PDF' in pdf_resp3.content[:10]:
-            logging.info("Tentative 3 OK")
-            return Response(
-                content=pdf_resp3.content,
-                media_type="application/pdf",
-                headers={
-                    "Content-Disposition": f"inline; filename=\"{att_name}\"",
-                    "Access-Control-Allow-Origin": "*"
-                }
-            )
-
-        logging.error(f"Toutes les tentatives ont échoué. Dernier contenu: {pdf_resp2.content[:200]}")
-        return Response(content=b"Erreur telechargement", status_code=500)
 
     except Exception as e:
-        logging.error(f"get_pdf error: {e}")
+        logging.error(f"get_pdf_provisoire error: {e}")
         return Response(content=str(e).encode(), status_code=500)
 
+
+@app.get("/pebepc/mission/{token}/pdf/final")
+def get_pdf_definitif(token: str):
+    """
+    Récupère le PDF définitif depuis x_studio_pdf_definitif via XML-RPC.
+    """
+    try:
+        uid, models = odoo_connect()
+
+        events = models.execute_kw(
+            ODOO_DB, uid, ODOO_PASSWORD,
+            "calendar.event", "search_read",
+            [[["x_studio_client_token", "=", token], ["active", "=", True]]],
+            {"fields": ["id", "name", "x_studio_pdf_definitif"], "limit": 1}
+        )
+
+        if not events:
+            return Response(content=b"Mission introuvable", status_code=404)
+
+        ev      = events[0]
+        pdf_b64 = ev.get("x_studio_pdf_definitif")
+
+        if not pdf_b64:
+            return Response(content=b"Aucun PDF définitif disponible", status_code=404)
+
+        pdf_bytes = base64.b64decode(pdf_b64)
+        filename  = f"PEB_definitif_{ev['id']}.pdf"
+
+        logging.info(f"PDF définitif servi: {len(pdf_bytes)} octets pour token={token}")
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"inline; filename=\"{filename}\"",
+                "Access-Control-Allow-Origin": "*"
+            }
+        )
+
+    except Exception as e:
+        logging.error(f"get_pdf_definitif error: {e}")
+        return Response(content=str(e).encode(), status_code=500)
+
+
+# ── MISSION CLIENT ─────────────────────────────────────────
 
 @app.get("/pebepc/mission/{token}")
 def get_mission(token: str):
@@ -565,36 +483,26 @@ def get_mission(token: str):
             ODOO_DB, uid, ODOO_PASSWORD,
             "calendar.event", "search_read",
             [[["x_studio_client_token", "=", token], ["active", "=", True]]],
-            {
-                "fields": [
-                    "id", "name", "start",
-                    "x_studio_adresse_du_bien",
-                    "x_studio_informations_sur_le_bien",
-                    "x_studio_statut_draft",
-                    "x_studio_remarques_client"
-                ],
-                "limit": 1
-            }
+            {"fields": ["id", "name", "start", "x_studio_adresse_du_bien",
+                        "x_studio_informations_sur_le_bien", "x_studio_statut_draft",
+                        "x_studio_remarques_client", "x_studio_pdf_provisoire"], "limit": 1}
         )
+
         if not events:
             return {"success": False, "error": "Mission introuvable"}
 
-        ev = events[0]
+        ev    = events[0]
         infos = ev.get("x_studio_informations_sur_le_bien", "") or ""
-        type_bien, superficie, client_nom = "", "", ""
+        type_bien = superficie = client_nom = ""
 
         tm = re.search(r"Type\s*:\s*(.+)", infos)
         if tm: type_bien = tm.group(1).strip()
-
         sm = re.search(r"Superficie\s*:\s*(.+)", infos)
         if sm: superficie = sm.group(1).strip()
-
         mand = infos.split("MANDATAIRE")
         if len(mand) > 1:
             nm = re.search(r"Nom\s*:\s*(.+)", mand[1])
             if nm: client_nom = nm.group(1).strip()
-
-        statut = ev.get("x_studio_statut_draft") or "false"
 
         return {
             "success": True,
@@ -606,8 +514,9 @@ def get_mission(token: str):
                 "type_bien":  type_bien,
                 "superficie": superficie,
                 "client_nom": client_nom,
-                "statut":     str(statut),
-                "remarques":  ev.get("x_studio_remarques_client", "") or ""
+                "statut":     str(ev.get("x_studio_statut_draft") or "false"),
+                "remarques":  ev.get("x_studio_remarques_client", "") or "",
+                "has_pdf":    bool(ev.get("x_studio_pdf_provisoire"))
             }
         }
 
@@ -628,15 +537,11 @@ def accept_mission(token: str):
         )
         if not events:
             return {"success": False, "error": "Mission introuvable"}
-
         event_id = events[0]["id"]
-        models.execute_kw(
-            ODOO_DB, uid, ODOO_PASSWORD,
-            "calendar.event", "write",
-            [[event_id], {"x_studio_statut_draft": "draft_accepted"}]
-        )
+        models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "write",
+            [[event_id], {"x_studio_statut_draft": "draft_accepted"}])
+        logging.info(f"Mission {event_id} acceptée")
         return {"success": True}
-
     except Exception as e:
         logging.error(f"accept_mission error: {e}")
         return {"success": False, "error": str(e)}
@@ -654,18 +559,14 @@ def refuse_mission(token: str, req: RefuseRequest):
         )
         if not events:
             return {"success": False, "error": "Mission introuvable"}
-
         event_id = events[0]["id"]
-        models.execute_kw(
-            ODOO_DB, uid, ODOO_PASSWORD,
-            "calendar.event", "write",
+        models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "write",
             [[event_id], {
                 "x_studio_statut_draft":     "draft_refused",
                 "x_studio_remarques_client": req.remarques or ""
-            }]
-        )
+            }])
+        logging.info(f"Mission {event_id} refusée")
         return {"success": True}
-
     except Exception as e:
         logging.error(f"refuse_mission error: {e}")
         return {"success": False, "error": str(e)}
