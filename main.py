@@ -227,9 +227,10 @@ def submit_rdv(req: SubmitRequest):
 
                 try:
                     models.execute_kw(
-                        ODOO_DB, uid, ODOO_PASSWORD,
-                        "calendar.event", "write",
-                        [[event_id], {"x_invoice_id": invoice_id}]
+    ODOO_DB, uid, ODOO_PASSWORD,
+    "calendar.event", "write",
+    [[event_id], {"x_studio_facture_liee": invoice_id}]
+)
                     )
                 except Exception as e:
                     logging.warning(f"Lien facture-event: {e}")
