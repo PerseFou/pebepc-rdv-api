@@ -250,6 +250,7 @@ async def send_draft(
         logging.info(f"send_draft: event_id={event_id}, token={token}, fichier={pdf.filename}")
 
         pdf_bytes = await pdf.read()
+        pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
 
         models.execute_kw(
             ODOO_DB, uid, ODOO_PASSWORD,
@@ -257,7 +258,7 @@ async def send_draft(
             [{
                 "name": pdf.filename or "PEB_provisoire.pdf",
                 "type": "binary",
-                "raw": pdf_bytes,
+                "datas": pdf_b64,
                 "res_model": "calendar.event",
                 "res_id": event_id,
                 "mimetype": "application/pdf"
@@ -305,12 +306,12 @@ def get_pdf(token: str):
                 ["res_id", "=", event_id],
                 ["mimetype", "=", "application/pdf"]
             ]],
-            {"fields": ["id", "name", "raw"], "limit": 1, "order": "id desc"}
+            {"fields": ["id", "name", "datas"], "limit": 1, "order": "id desc"}
         )
         if not attachments:
             return Response(content=b"PDF introuvable", status_code=404)
 
-        pdf_bytes = attachments[0]["raw"]
+        pdf_bytes = base64.b64decode(attachments[0]["datas"])
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",
