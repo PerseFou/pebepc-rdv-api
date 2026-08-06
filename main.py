@@ -1,6 +1,7 @@
 import os
 import xmlrpc.client
 import logging
+import secrets
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -36,6 +37,8 @@ def odoo_connect():
     return uid, models
 
 
+# ── MODÈLES ────────────────────────────────────────────────
+
 class TakenSlotsRequest(BaseModel):
     start: str
     stop: str
@@ -66,6 +69,16 @@ class SubmitRequest(BaseModel):
     fact_email: Optional[str] = ""
     fact_tva: Optional[str] = ""
 
+
+class RefuseRequest(BaseModel):
+    remarques: Optional[str] = ""
+
+
+class SendDraftRequest(BaseModel):
+    event_id: int
+
+
+# ── ENDPOINTS EXISTANTS ────────────────────────────────────
 
 @app.get("/")
 def root():
@@ -150,8 +163,10 @@ def submit_rdv(req: SubmitRequest):
         logging.info(f"Création événement: {title}")
         logging.info(f"Start: {req.start_utc} / Stop: {req.stop_utc}")
 
-        partner_ids = list({expert_id, client_id})
-        if place_id:
+        partner_ids = [expert_id]
+        if client_id and client_id != expert_id:
+            partner_ids.append(client_id)
+        if place_id and place_id not in partner_ids:
             partner_ids.append(place_id)
 
         event_id = models.execute_kw(
@@ -226,4 +241,175 @@ def submit_rdv(req: SubmitRequest):
 
     except Exception as e:
         logging.error(f"submit_rdv error: {e}")
+        return {"success": False, "error": str(e)}
+
+
+# ── ENDPOINTS DASHBOARD / WORKFLOW CLIENT ──────────────────
+
+@app.post("/pebepc/dashboard/send_draft")
+def send_draft(req: SendDraftRequest):
+    """
+    Génère un token unique, met le statut à 'draft_sent',
+    retourne le token et le lien client.
+    Appelé par le dashboard expert.
+    """
+    try:
+        uid, models = odoo_connect()
+
+        token = secrets.token_urlsafe(24)
+        logging.info(f"send_draft: event_id={req.event_id}, token={token}")
+
+        models.execute_kw(
+            ODOO_DB, uid, ODOO_PASSWORD,
+            "calendar.event", "write",
+            [[req.event_id], {
+                "x_studio_client_token": token,
+                "x_studio_statut_draft": "draft_sent"
+            }]
+        )
+
+        return {"success": True, "token": token}
+
+    except Exception as e:
+        logging.error(f"send_draft error: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/pebepc/mission/{token}")
+def get_mission(token: str):
+    """
+    Retourne les infos de la mission associée au token.
+    Appelé par la page publique client.
+    """
+    try:
+        uid, models = odoo_connect()
+        logging.info(f"get_mission: token={token}")
+
+        events = models.execute_kw(
+            ODOO_DB, uid, ODOO_PASSWORD,
+            "calendar.event", "search_read",
+            [[["x_studio_client_token", "=", token], ["active", "=", True]]],
+            {
+                "fields": [
+                    "id", "name", "start",
+                    "x_studio_adresse_du_bien",
+                    "x_studio_informations_sur_le_bien",
+                    "x_studio_statut_draft",
+                    "x_studio_remarques_client"
+                ],
+                "limit": 1
+            }
+        )
+
+        if not events:
+            logging.warning(f"get_mission: token non trouvé: {token}")
+            return {"success": False, "error": "Mission introuvable"}
+
+        ev = events[0]
+
+        # Parser les infos structurées
+        infos = ev.get("x_studio_informations_sur_le_bien", "") or ""
+        type_bien, superficie, client_nom = "", "", ""
+
+        tm = __import__("re").search(r"Type\s*:\s*(.+)", infos)
+        if tm: type_bien = tm.group(1).strip()
+
+        sm = __import__("re").search(r"Superficie\s*:\s*(.+)", infos)
+        if sm: superficie = sm.group(1).strip()
+
+        mand = infos.split("MANDATAIRE")
+        if len(mand) > 1:
+            nm = __import__("re").search(r"Nom\s*:\s*(.+)", mand[1])
+            if nm: client_nom = nm.group(1).strip()
+
+        statut = ev.get("x_studio_statut_draft") or "false"
+
+        return {
+            "success": True,
+            "mission": {
+                "id":        ev["id"],
+                "name":      ev["name"],
+                "start":     ev.get("start", ""),
+                "adresse":   ev.get("x_studio_adresse_du_bien", ""),
+                "type_bien": type_bien,
+                "superficie": superficie,
+                "client_nom": client_nom,
+                "statut":    str(statut),
+                "remarques": ev.get("x_studio_remarques_client", "") or ""
+            }
+        }
+
+    except Exception as e:
+        logging.error(f"get_mission error: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/pebepc/mission/{token}/accept")
+def accept_mission(token: str):
+    """
+    Client accepte le PEB provisoire → statut 'draft_accepted'.
+    """
+    try:
+        uid, models = odoo_connect()
+        logging.info(f"accept_mission: token={token}")
+
+        events = models.execute_kw(
+            ODOO_DB, uid, ODOO_PASSWORD,
+            "calendar.event", "search_read",
+            [[["x_studio_client_token", "=", token], ["active", "=", True]]],
+            {"fields": ["id"], "limit": 1}
+        )
+
+        if not events:
+            return {"success": False, "error": "Mission introuvable"}
+
+        event_id = events[0]["id"]
+        models.execute_kw(
+            ODOO_DB, uid, ODOO_PASSWORD,
+            "calendar.event", "write",
+            [[event_id], {"x_studio_statut_draft": "draft_accepted"}]
+        )
+
+        logging.info(f"Mission {event_id} acceptée")
+        return {"success": True}
+
+    except Exception as e:
+        logging.error(f"accept_mission error: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/pebepc/mission/{token}/refuse")
+def refuse_mission(token: str, req: RefuseRequest):
+    """
+    Client refuse le PEB provisoire → statut 'draft_refused' + remarques.
+    """
+    try:
+        uid, models = odoo_connect()
+        logging.info(f"refuse_mission: token={token}, remarques={req.remarques}")
+
+        events = models.execute_kw(
+            ODOO_DB, uid, ODOO_PASSWORD,
+            "calendar.event", "search_read",
+            [[["x_studio_client_token", "=", token], ["active", "=", True]]],
+            {"fields": ["id"], "limit": 1}
+        )
+
+        if not events:
+            return {"success": False, "error": "Mission introuvable"}
+
+        event_id = events[0]["id"]
+        models.execute_kw(
+            ODOO_DB, uid, ODOO_PASSWORD,
+            "calendar.event", "write",
+            [[event_id], {
+                "x_studio_statut_draft":    "draft_refused",
+                "x_studio_remarques_client": req.remarques or ""
+            }]
+        )
+
+        logging.info(f"Mission {event_id} refusée")
+        return {"success": True}
+
+    except Exception as e:
+        logging.error(f"refuse_mission error: {e}")
         return {"success": False, "error": str(e)}
