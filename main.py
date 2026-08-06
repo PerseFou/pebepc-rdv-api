@@ -4,6 +4,7 @@ import logging
 import secrets
 import re
 import base64
+import requests as req_lib
 from fastapi import FastAPI, Form, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
@@ -39,6 +40,20 @@ def odoo_connect():
         raise Exception("Authentification Odoo échouée")
     models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
     return uid, models
+
+
+def odoo_session():
+    session = req_lib.Session()
+    login_resp = session.post(f"{ODOO_URL}/web/session/authenticate", json={
+        "jsonrpc": "2.0", "method": "call", "id": 1,
+        "params": {
+            "db": ODOO_DB,
+            "login": ODOO_USER,
+            "password": ODOO_PASSWORD
+        }
+    })
+    logging.info(f"Session Odoo: {login_resp.status_code}")
+    return session
 
 
 # ── MODÈLES ────────────────────────────────────────────────
@@ -298,7 +313,6 @@ def get_pdf(token: str):
 
         event_id = events[0]["id"]
 
-        # Trouver l'ID de l'attachment
         attachment_ids = models.execute_kw(
             ODOO_DB, uid, ODOO_PASSWORD,
             "ir.attachment", "search",
@@ -312,21 +326,35 @@ def get_pdf(token: str):
         if not attachment_ids:
             return Response(content=b"PDF introuvable", status_code=404)
 
-        # Lire via read() avec db_datas
+        att_id = attachment_ids[0]
+
         attachments = models.execute_kw(
             ODOO_DB, uid, ODOO_PASSWORD,
             "ir.attachment", "read",
-            [attachment_ids],
-            {"fields": ["name", "db_datas"]}
+            [[att_id]],
+            {"fields": ["name"]}
         )
-        if not attachments or not attachments[0].get("db_datas"):
-            return Response(content=b"PDF vide", status_code=404)
+        if not attachments:
+            return Response(content=b"PDF introuvable", status_code=404)
 
-        pdf_bytes = base64.b64decode(attachments[0]["db_datas"])
+        att_name = attachments[0]["name"]
+
+        # Télécharger via session HTTP authentifiée
+        session = odoo_session()
+        pdf_resp = session.get(
+            f"{ODOO_URL}/web/content/{att_id}",
+            params={"download": "true"},
+            timeout=30
+        )
+        logging.info(f"Téléchargement PDF: status={pdf_resp.status_code}, taille={len(pdf_resp.content)}")
+
+        if pdf_resp.status_code != 200:
+            return Response(content=b"Erreur telechargement", status_code=500)
+
         return Response(
-            content=pdf_bytes,
+            content=pdf_resp.content,
             media_type="application/pdf",
-            headers={"Content-Disposition": f"inline; filename=\"{attachments[0]['name']}\""}
+            headers={"Content-Disposition": f"inline; filename=\"{att_name}\""}
         )
 
     except Exception as e:
