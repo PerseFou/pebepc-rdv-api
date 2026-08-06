@@ -298,20 +298,31 @@ def get_pdf(token: str):
 
         event_id = events[0]["id"]
 
-        attachments = models.execute_kw(
+        # Trouver l'ID de l'attachment
+        attachment_ids = models.execute_kw(
             ODOO_DB, uid, ODOO_PASSWORD,
-            "ir.attachment", "search_read",
+            "ir.attachment", "search",
             [[
                 ["res_model", "=", "calendar.event"],
                 ["res_id", "=", event_id],
                 ["mimetype", "=", "application/pdf"]
             ]],
-            {"fields": ["id", "name", "datas"], "limit": 1, "order": "id desc"}
+            {"limit": 1, "order": "id desc"}
         )
-        if not attachments:
+        if not attachment_ids:
             return Response(content=b"PDF introuvable", status_code=404)
 
-        pdf_bytes = base64.b64decode(attachments[0]["datas"])
+        # Lire via read() avec db_datas
+        attachments = models.execute_kw(
+            ODOO_DB, uid, ODOO_PASSWORD,
+            "ir.attachment", "read",
+            [attachment_ids],
+            {"fields": ["name", "db_datas"]}
+        )
+        if not attachments or not attachments[0].get("db_datas"):
+            return Response(content=b"PDF vide", status_code=404)
+
+        pdf_bytes = base64.b64decode(attachments[0]["db_datas"])
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",
