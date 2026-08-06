@@ -12,7 +12,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Restreindre à https://peb-pulls.odoo.com en production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -26,15 +26,15 @@ EXPERT_NAME   = "Armine Sotodeh"
 
 
 def odoo_connect():
+    logging.info(f"Connexion Odoo: {ODOO_URL} / {ODOO_DB} / {ODOO_USER}")
     common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common")
     uid = common.authenticate(ODOO_DB, ODOO_USER, ODOO_PASSWORD, {})
+    logging.info(f"UID obtenu: {uid}")
     if not uid:
         raise Exception("Authentification Odoo échouée")
     models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
     return uid, models
 
-
-# ── MODÈLES ────────────────────────────────────────────────
 
 class TakenSlotsRequest(BaseModel):
     start: str
@@ -67,8 +67,6 @@ class SubmitRequest(BaseModel):
     fact_tva: Optional[str] = ""
 
 
-# ── ENDPOINTS ──────────────────────────────────────────────
-
 @app.get("/")
 def root():
     return {"status": "ok", "service": "pebepc-rdv-api"}
@@ -88,6 +86,7 @@ def taken_slots(req: TakenSlotsRequest):
             ]],
             {"fields": ["start", "stop"], "limit": 500}
         )
+        logging.info(f"taken_slots: {len(events)} événements trouvés")
         slots = [
             {"start": e["start"], "stop": e["stop"], "expertEmail": ODOO_USER}
             for e in (events or [])
@@ -101,9 +100,11 @@ def taken_slots(req: TakenSlotsRequest):
 @app.post("/pebepc/rdv/submit")
 def submit_rdv(req: SubmitRequest):
     try:
+        logging.info(f"submit_rdv reçu: {req.prenom} {req.nom} / {req.email}")
         uid, models = odoo_connect()
 
         def find_or_create_partner(email, name, phone=""):
+            logging.info(f"find_or_create_partner: {email}")
             existing = models.execute_kw(
                 ODOO_DB, uid, ODOO_PASSWORD,
                 "res.partner", "search_read",
@@ -111,18 +112,19 @@ def submit_rdv(req: SubmitRequest):
                 {"fields": ["id"], "limit": 1}
             )
             if existing:
+                logging.info(f"Partenaire existant: {existing[0]['id']}")
                 return existing[0]["id"]
-            return models.execute_kw(
+            new_id = models.execute_kw(
                 ODOO_DB, uid, ODOO_PASSWORD,
                 "res.partner", "create",
                 [{"name": name, "email": email, "phone": phone}]
             )
+            logging.info(f"Nouveau partenaire créé: {new_id}")
+            return new_id
 
-        # Partenaires
         expert_id = find_or_create_partner(ODOO_USER, EXPERT_NAME)
         client_id = find_or_create_partner(req.email, f"{req.prenom} {req.nom}", req.tel)
 
-        # Partenaire contact sur place
         place_id = None
         if req.contact_place_email:
             place_id = find_or_create_partner(
@@ -131,13 +133,11 @@ def submit_rdv(req: SubmitRequest):
                 req.contact_place_tel
             )
 
-        # Adresse complète
         adresse = req.rue
         if req.boite:
             adresse += f", {req.boite}"
         adresse += f", {req.cp} {req.ville}"
 
-        # Bloc informations structuré (champ Odoo)
         gestion = req.gestion_type or ""
         x_infos = "AGENCE\n" if gestion == "Agence" else "PROPRIÉTAIRE\n"
         if req.contact_place_nom:   x_infos += f"Nom : {req.contact_place_nom}\n"
@@ -147,13 +147,13 @@ def submit_rdv(req: SubmitRequest):
         x_infos += f"\n\nMANDATAIRE\nNom : {req.prenom} {req.nom}\nTél : {req.tel}\nEmail : {req.email}"
 
         title = f"PEB — {req.type_bien} {req.superficie} — {adresse}"
+        logging.info(f"Création événement: {title}")
+        logging.info(f"Start: {req.start_utc} / Stop: {req.stop_utc}")
 
-        # Partner IDs uniques
         partner_ids = list({expert_id, client_id})
         if place_id:
             partner_ids.append(place_id)
 
-        # Création événement calendrier
         event_id = models.execute_kw(
             ODOO_DB, uid, ODOO_PASSWORD,
             "calendar.event", "create",
@@ -165,8 +165,8 @@ def submit_rdv(req: SubmitRequest):
                 "partner_ids": [[6, 0, partner_ids]]
             }]
         )
+        logging.info(f"Événement créé: {event_id}")
 
-        # Champs custom studio (best effort)
         try:
             models.execute_kw(
                 ODOO_DB, uid, ODOO_PASSWORD,
@@ -176,14 +176,15 @@ def submit_rdv(req: SubmitRequest):
                     "x_studio_informations_sur_le_bien": x_infos
                 }]
             )
+            logging.info("Champs studio écrits")
         except Exception as e:
             logging.warning(f"Champs studio event: {e}")
 
-        # Création facture si prix > 0
         invoice_id = None
         if req.prix and req.prix > 0:
             try:
                 htva = round(req.prix / 1.21, 2)
+                logging.info(f"Création facture: HTVA={htva}")
                 taxes = models.execute_kw(
                     ODOO_DB, uid, ODOO_PASSWORD,
                     "account.tax", "search_read",
@@ -191,6 +192,7 @@ def submit_rdv(req: SubmitRequest):
                     {"fields": ["id"], "limit": 1}
                 )
                 tax_ids = [[4, taxes[0]["id"]]] if taxes else []
+                logging.info(f"Tax IDs: {tax_ids}")
 
                 invoice_id = models.execute_kw(
                     ODOO_DB, uid, ODOO_PASSWORD,
@@ -206,8 +208,8 @@ def submit_rdv(req: SubmitRequest):
                         }]]
                     }]
                 )
+                logging.info(f"Facture créée: {invoice_id}")
 
-                # Lien facture ↔ événement (best effort)
                 try:
                     models.execute_kw(
                         ODOO_DB, uid, ODOO_PASSWORD,
