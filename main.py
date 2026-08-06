@@ -332,30 +332,19 @@ def get_pdf(token: str):
             ODOO_DB, uid, ODOO_PASSWORD,
             "ir.attachment", "read",
             [[att_id]],
-            {"fields": ["name"]}
+            {"fields": ["name", "access_token"]}
         )
         if not attachments:
             return Response(content=b"PDF introuvable", status_code=404)
 
-        att_name = attachments[0]["name"]
+        att = attachments[0]
+        access_token = att.get("access_token") or ""
 
-        # Télécharger via session HTTP authentifiée
-        session = odoo_session()
-        pdf_resp = session.get(
-            f"{ODOO_URL}/web/content/{att_id}",
-            params={"download": "true"},
-            timeout=30
-        )
-        logging.info(f"Téléchargement PDF: status={pdf_resp.status_code}, taille={len(pdf_resp.content)}")
-
-        if pdf_resp.status_code != 200:
-            return Response(content=b"Erreur telechargement", status_code=500)
-
-        return Response(
-            content=pdf_resp.content,
-            media_type="application/pdf",
-            headers={"Content-Disposition": f"inline; filename=\"{att_name}\""}
-        )
+        # Redirection directe vers Odoo
+        from fastapi.responses import RedirectResponse
+        url = f"{ODOO_URL}/web/content/{att_id}?access_token={access_token}&download=true"
+        logging.info(f"Redirection PDF: {url}")
+        return RedirectResponse(url=url)
 
     except Exception as e:
         logging.error(f"get_pdf error: {e}")
