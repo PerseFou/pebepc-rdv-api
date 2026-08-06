@@ -2,6 +2,7 @@ import os
 import xmlrpc.client
 import logging
 import secrets
+import re
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -78,7 +79,7 @@ class SendDraftRequest(BaseModel):
     event_id: int
 
 
-# ── ENDPOINTS EXISTANTS ────────────────────────────────────
+# ── ENDPOINTS ──────────────────────────────────────────────
 
 @app.get("/")
 def root():
@@ -225,13 +226,14 @@ def submit_rdv(req: SubmitRequest):
                 )
                 logging.info(f"Facture créée: {invoice_id}")
 
+                # ✅ Correction : x_studio_facture_liee au lieu de x_invoice_id
                 try:
                     models.execute_kw(
-    ODOO_DB, uid, ODOO_PASSWORD,
-    "calendar.event", "write",
-    [[event_id], {"x_studio_facture_liee": invoice_id}]
-)
+                        ODOO_DB, uid, ODOO_PASSWORD,
+                        "calendar.event", "write",
+                        [[event_id], {"x_studio_facture_liee": invoice_id}]
                     )
+                    logging.info("Facture liée à l'événement")
                 except Exception as e:
                     logging.warning(f"Lien facture-event: {e}")
 
@@ -245,18 +247,12 @@ def submit_rdv(req: SubmitRequest):
         return {"success": False, "error": str(e)}
 
 
-# ── ENDPOINTS DASHBOARD / WORKFLOW CLIENT ──────────────────
+# ── DASHBOARD / WORKFLOW CLIENT ────────────────────────────
 
 @app.post("/pebepc/dashboard/send_draft")
 def send_draft(req: SendDraftRequest):
-    """
-    Génère un token unique, met le statut à 'draft_sent',
-    retourne le token et le lien client.
-    Appelé par le dashboard expert.
-    """
     try:
         uid, models = odoo_connect()
-
         token = secrets.token_urlsafe(24)
         logging.info(f"send_draft: event_id={req.event_id}, token={token}")
 
@@ -278,10 +274,6 @@ def send_draft(req: SendDraftRequest):
 
 @app.get("/pebepc/mission/{token}")
 def get_mission(token: str):
-    """
-    Retourne les infos de la mission associée au token.
-    Appelé par la page publique client.
-    """
     try:
         uid, models = odoo_connect()
         logging.info(f"get_mission: token={token}")
@@ -307,20 +299,18 @@ def get_mission(token: str):
             return {"success": False, "error": "Mission introuvable"}
 
         ev = events[0]
-
-        # Parser les infos structurées
         infos = ev.get("x_studio_informations_sur_le_bien", "") or ""
         type_bien, superficie, client_nom = "", "", ""
 
-        tm = __import__("re").search(r"Type\s*:\s*(.+)", infos)
+        tm = re.search(r"Type\s*:\s*(.+)", infos)
         if tm: type_bien = tm.group(1).strip()
 
-        sm = __import__("re").search(r"Superficie\s*:\s*(.+)", infos)
+        sm = re.search(r"Superficie\s*:\s*(.+)", infos)
         if sm: superficie = sm.group(1).strip()
 
         mand = infos.split("MANDATAIRE")
         if len(mand) > 1:
-            nm = __import__("re").search(r"Nom\s*:\s*(.+)", mand[1])
+            nm = re.search(r"Nom\s*:\s*(.+)", mand[1])
             if nm: client_nom = nm.group(1).strip()
 
         statut = ev.get("x_studio_statut_draft") or "false"
@@ -328,15 +318,15 @@ def get_mission(token: str):
         return {
             "success": True,
             "mission": {
-                "id":        ev["id"],
-                "name":      ev["name"],
-                "start":     ev.get("start", ""),
-                "adresse":   ev.get("x_studio_adresse_du_bien", ""),
-                "type_bien": type_bien,
+                "id":         ev["id"],
+                "name":       ev["name"],
+                "start":      ev.get("start", ""),
+                "adresse":    ev.get("x_studio_adresse_du_bien", ""),
+                "type_bien":  type_bien,
                 "superficie": superficie,
                 "client_nom": client_nom,
-                "statut":    str(statut),
-                "remarques": ev.get("x_studio_remarques_client", "") or ""
+                "statut":     str(statut),
+                "remarques":  ev.get("x_studio_remarques_client", "") or ""
             }
         }
 
@@ -347,9 +337,6 @@ def get_mission(token: str):
 
 @app.post("/pebepc/mission/{token}/accept")
 def accept_mission(token: str):
-    """
-    Client accepte le PEB provisoire → statut 'draft_accepted'.
-    """
     try:
         uid, models = odoo_connect()
         logging.info(f"accept_mission: token={token}")
@@ -381,9 +368,6 @@ def accept_mission(token: str):
 
 @app.post("/pebepc/mission/{token}/refuse")
 def refuse_mission(token: str, req: RefuseRequest):
-    """
-    Client refuse le PEB provisoire → statut 'draft_refused' + remarques.
-    """
     try:
         uid, models = odoo_connect()
         logging.info(f"refuse_mission: token={token}, remarques={req.remarques}")
@@ -403,7 +387,7 @@ def refuse_mission(token: str, req: RefuseRequest):
             ODOO_DB, uid, ODOO_PASSWORD,
             "calendar.event", "write",
             [[event_id], {
-                "x_studio_statut_draft":    "draft_refused",
+                "x_studio_statut_draft":     "draft_refused",
                 "x_studio_remarques_client": req.remarques or ""
             }]
         )
