@@ -29,7 +29,6 @@ ODOO_USER     = os.getenv("ODOO_USER", "armine.sotodeh10@gmail.com")
 ODOO_PASSWORD = os.getenv("ODOO_PASSWORD", "")
 EXPERT_NAME   = "Armine Sotodeh"
 RAILWAY_URL   = os.getenv("RAILWAY_URL", "https://web-production-5789.up.railway.app")
-ODOO_BASE_URL = os.getenv("ODOO_URL", "https://peb-pulls.odoo.com")
 
 
 def odoo_connect():
@@ -43,21 +42,7 @@ def odoo_connect():
     return uid, models
 
 
-def odoo_session():
-    session = req_lib.Session()
-    session.post(f"{ODOO_URL}/web/session/authenticate", json={
-        "jsonrpc": "2.0", "method": "call", "id": 1,
-        "params": {
-            "db": ODOO_DB,
-            "login": ODOO_USER,
-            "password": ODOO_PASSWORD
-        }
-    })
-    return session
-
-
 def get_mission_info(uid, models, event_id):
-    """Récupère les infos du mandataire depuis l'événement."""
     events = models.execute_kw(
         ODOO_DB, uid, ODOO_PASSWORD,
         "calendar.event", "read",
@@ -80,16 +65,15 @@ def get_mission_info(uid, models, event_id):
         if pm: client_tel = pm.group(1).strip()
 
     return {
-        "nom":    client_nom,
-        "email":  client_email,
-        "tel":    client_tel,
+        "nom":     client_nom,
+        "email":   client_email,
+        "tel":     client_tel,
         "adresse": ev.get("x_studio_adresse_du_bien", ""),
-        "name":   ev.get("name", "")
+        "name":    ev.get("name", "")
     }
 
 
 def send_odoo_mail(uid, models, email_to, subject, body_html):
-    """Envoie un mail via mail.mail Odoo."""
     try:
         mail_id = models.execute_kw(
             ODOO_DB, uid, ODOO_PASSWORD,
@@ -341,16 +325,12 @@ async def send_draft(
             }]
         )
 
-        # Récupérer infos mandataire
         infos = get_mission_info(uid, models, event_id)
         client_email = infos.get("email", "")
         client_nom   = infos.get("nom", "le mandataire")
         adresse      = infos.get("adresse", "")
+        client_link  = f"https://peb-pulls.odoo.com/rdv-client?token={token}"
 
-        # Construire le lien client
-        client_link = f"https://peb-pulls.odoo.com/rdv-client?token={token}"
-
-        # Envoyer le mail si on a un email
         if client_email:
             subject = "Votre PEB provisoire est disponible"
             body_html = f"""
@@ -364,21 +344,17 @@ async def send_draft(
         <p style="background:#f4f6fb;padding:12px;border-radius:8px;color:#1B3A8C;font-weight:bold;">{adresse}</p>
         <p style="color:#374151;">est maintenant disponible. Veuillez le consulter et nous indiquer si vous l'acceptez ou souhaitez des modifications.</p>
         <div style="text-align:center;margin:28px 0;">
-            <a href="{client_link}"
-               style="background:#1B3A8C;color:#fff;padding:14px 32px;border-radius:999px;text-decoration:none;font-weight:bold;font-size:1rem;">
+            <a href="{client_link}" style="background:#1B3A8C;color:#fff;padding:14px 32px;border-radius:999px;text-decoration:none;font-weight:bold;font-size:1rem;">
                 Consulter mon PEB provisoire →
             </a>
         </div>
-        <p style="color:#8a9bb5;font-size:0.82rem;">Si le bouton ne fonctionne pas, copiez ce lien dans votre navigateur :<br/>
+        <p style="color:#8a9bb5;font-size:0.82rem;">Si le bouton ne fonctionne pas, copiez ce lien :<br/>
         <a href="{client_link}" style="color:#1B3A8C;">{client_link}</a></p>
         <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;"/>
-        <p style="color:#8a9bb5;font-size:0.78rem;">
-            Armine Sotodeh — Expert PEB<br/>
-            <a href="mailto:{ODOO_USER}" style="color:#1B3A8C;">{ODOO_USER}</a>
-        </p>
+        <p style="color:#8a9bb5;font-size:0.78rem;">Armine Sotodeh — Expert PEB<br/>
+        <a href="mailto:{ODOO_USER}" style="color:#1B3A8C;">{ODOO_USER}</a></p>
     </div>
-</div>
-"""
+</div>"""
             send_odoo_mail(uid, models, client_email, subject, body_html)
         else:
             logging.warning(f"Pas d'email trouvé pour event_id={event_id}")
@@ -402,7 +378,7 @@ async def send_final(
         pdf_bytes = await pdf.read()
         pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
 
-        models.execute_kw(
+        att_id = models.execute_kw(
             ODOO_DB, uid, ODOO_PASSWORD,
             "ir.attachment", "create",
             [{
@@ -422,36 +398,20 @@ async def send_final(
             [[event_id], {"x_studio_statut_draft": "closed"}]
         )
 
-        # Récupérer infos mandataire
         infos = get_mission_info(uid, models, event_id)
         client_email = infos.get("email", "")
         client_nom   = infos.get("nom", "le mandataire")
         adresse      = infos.get("adresse", "")
 
-        # Récupérer l'attachment pour le lien direct
-        attachment_ids = models.execute_kw(
+        # Lien Railway pour télécharger le PDF définitif (proxy authentifié)
+        token_event = models.execute_kw(
             ODOO_DB, uid, ODOO_PASSWORD,
-            "ir.attachment", "search",
-            [[
-                ["res_model", "=", "calendar.event"],
-                ["res_id", "=", event_id],
-                ["mimetype", "=", "application/pdf"],
-                ["name", "ilike", "definitif"]
-            ]],
-            {"limit": 1, "order": "id desc"}
+            "calendar.event", "read",
+            [[event_id]],
+            {"fields": ["x_studio_client_token"]}
         )
-
-        pdf_link = ""
-        if attachment_ids:
-            att = models.execute_kw(
-                ODOO_DB, uid, ODOO_PASSWORD,
-                "ir.attachment", "read",
-                [attachment_ids],
-                {"fields": ["name", "access_token"]}
-            )
-            if att:
-                access_token = att[0].get("access_token", "")
-                pdf_link = f"{ODOO_URL}/web/content/{attachment_ids[0]}?access_token={access_token}&download=true"
+        token = token_event[0].get("x_studio_client_token", "") if token_event else ""
+        pdf_link = f"{RAILWAY_URL}/pebepc/mission/{token}/pdf" if token else ""
 
         if client_email:
             subject = "Votre certificat PEB définitif est disponible"
@@ -464,16 +424,13 @@ async def send_final(
         <p style="color:#374151;">Bonjour <strong>{client_nom}</strong>,</p>
         <p style="color:#374151;">Votre certificat PEB <strong>définitif</strong> pour le bien situé au :</p>
         <p style="background:#f0fdf4;padding:12px;border-radius:8px;color:#16a34a;font-weight:bold;">{adresse}</p>
-        <p style="color:#374151;">est maintenant disponible. Vous pouvez le télécharger en cliquant sur le bouton ci-dessous.</p>
+        <p style="color:#374151;">est maintenant disponible. Vous pouvez le télécharger en cliquant ci-dessous.</p>
         {"<div style='text-align:center;margin:28px 0;'><a href='" + pdf_link + "' style='background:#10B981;color:#fff;padding:14px 32px;border-radius:999px;text-decoration:none;font-weight:bold;font-size:1rem;'>📥 Télécharger mon certificat PEB →</a></div>" if pdf_link else ""}
         <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;"/>
-        <p style="color:#8a9bb5;font-size:0.78rem;">
-            Armine Sotodeh — Expert PEB<br/>
-            <a href="mailto:{ODOO_USER}" style="color:#10B981;">{ODOO_USER}</a>
-        </p>
+        <p style="color:#8a9bb5;font-size:0.78rem;">Armine Sotodeh — Expert PEB<br/>
+        <a href="mailto:{ODOO_USER}" style="color:#10B981;">{ODOO_USER}</a></p>
     </div>
-</div>
-"""
+</div>"""
             send_odoo_mail(uid, models, client_email, subject, body_html)
         else:
             logging.warning(f"Pas d'email trouvé pour event_id={event_id}")
@@ -520,17 +477,42 @@ def get_pdf(token: str):
             ODOO_DB, uid, ODOO_PASSWORD,
             "ir.attachment", "read",
             [[att_id]],
-            {"fields": ["name", "access_token"]}
+            {"fields": ["name"]}
         )
-        if not attachments:
-            return Response(content=b"PDF introuvable", status_code=404)
+        att_name = attachments[0]["name"] if attachments else "PEB.pdf"
 
-        att = attachments[0]
-        access_token = att.get("access_token") or ""
+        # Session HTTP authentifiée — Railway télécharge et sert le PDF
+        session = req_lib.Session()
+        session.post(
+            f"{ODOO_URL}/web/session/authenticate",
+            json={
+                "jsonrpc": "2.0", "method": "call", "id": 1,
+                "params": {
+                    "db": ODOO_DB,
+                    "login": ODOO_USER,
+                    "password": ODOO_PASSWORD
+                }
+            },
+            timeout=15
+        )
 
-        url = f"{ODOO_URL}/web/content/{att_id}?access_token={access_token}&download=true"
-        logging.info(f"Redirection PDF: {url}")
-        return RedirectResponse(url=url)
+        pdf_resp = session.get(
+            f"{ODOO_URL}/web/content/{att_id}",
+            timeout=30
+        )
+        logging.info(f"PDF download: status={pdf_resp.status_code}, taille={len(pdf_resp.content)}")
+
+        if pdf_resp.status_code != 200 or len(pdf_resp.content) < 100:
+            return Response(content=b"Erreur telechargement", status_code=500)
+
+        return Response(
+            content=pdf_resp.content,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"inline; filename=\"{att_name}\"",
+                "Access-Control-Allow-Origin": "*"
+            }
+        )
 
     except Exception as e:
         logging.error(f"get_pdf error: {e}")
