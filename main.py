@@ -378,7 +378,7 @@ async def send_final(
         pdf_bytes = await pdf.read()
         pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
 
-        att_id = models.execute_kw(
+        models.execute_kw(
             ODOO_DB, uid, ODOO_PASSWORD,
             "ir.attachment", "create",
             [{
@@ -403,7 +403,6 @@ async def send_final(
         client_nom   = infos.get("nom", "le mandataire")
         adresse      = infos.get("adresse", "")
 
-        # Lien Railway pour télécharger le PDF définitif (proxy authentifié)
         token_event = models.execute_kw(
             ODOO_DB, uid, ODOO_PASSWORD,
             "calendar.event", "read",
@@ -481,38 +480,77 @@ def get_pdf(token: str):
         )
         att_name = attachments[0]["name"] if attachments else "PEB.pdf"
 
-        # Session HTTP authentifiée — Railway télécharge et sert le PDF
+        # Tentative 1 : basic auth
+        pdf_resp = req_lib.get(
+            f"{ODOO_URL}/web/content/{att_id}",
+            headers={"Authorization": f"Basic {base64.b64encode(f'{ODOO_USER}:{ODOO_PASSWORD}'.encode()).decode()}"},
+            timeout=30,
+            allow_redirects=True
+        )
+        logging.info(f"Tentative 1 basic auth: status={pdf_resp.status_code}, taille={len(pdf_resp.content)}, content-type={pdf_resp.headers.get('content-type','?')}")
+
+        if pdf_resp.status_code == 200 and len(pdf_resp.content) > 100 and b'%PDF' in pdf_resp.content[:10]:
+            logging.info("Tentative 1 OK")
+            return Response(
+                content=pdf_resp.content,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition": f"inline; filename=\"{att_name}\"",
+                    "Access-Control-Allow-Origin": "*"
+                }
+            )
+
+        # Tentative 2 : session cookie
         session = req_lib.Session()
-        session.post(
+        auth_resp = session.post(
             f"{ODOO_URL}/web/session/authenticate",
             json={
                 "jsonrpc": "2.0", "method": "call", "id": 1,
-                "params": {
-                    "db": ODOO_DB,
-                    "login": ODOO_USER,
-                    "password": ODOO_PASSWORD
-                }
+                "params": {"db": ODOO_DB, "login": ODOO_USER, "password": ODOO_PASSWORD}
             },
             timeout=15
         )
+        logging.info(f"Tentative 2 auth: status={auth_resp.status_code}, cookies={dict(session.cookies)}")
 
-        pdf_resp = session.get(
+        pdf_resp2 = session.get(
             f"{ODOO_URL}/web/content/{att_id}",
+            timeout=30,
+            allow_redirects=True
+        )
+        logging.info(f"Tentative 2 download: status={pdf_resp2.status_code}, taille={len(pdf_resp2.content)}, content-type={pdf_resp2.headers.get('content-type','?')}")
+
+        if pdf_resp2.status_code == 200 and len(pdf_resp2.content) > 100 and b'%PDF' in pdf_resp2.content[:10]:
+            logging.info("Tentative 2 OK")
+            return Response(
+                content=pdf_resp2.content,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition": f"inline; filename=\"{att_name}\"",
+                    "Access-Control-Allow-Origin": "*"
+                }
+            )
+
+        # Tentative 3 : params login
+        pdf_resp3 = req_lib.get(
+            f"{ODOO_URL}/web/content/{att_id}",
+            params={"db": ODOO_DB, "login": ODOO_USER, "password": ODOO_PASSWORD},
             timeout=30
         )
-        logging.info(f"PDF download: status={pdf_resp.status_code}, taille={len(pdf_resp.content)}")
+        logging.info(f"Tentative 3: status={pdf_resp3.status_code}, taille={len(pdf_resp3.content)}")
 
-        if pdf_resp.status_code != 200 or len(pdf_resp.content) < 100:
-            return Response(content=b"Erreur telechargement", status_code=500)
+        if pdf_resp3.status_code == 200 and len(pdf_resp3.content) > 100 and b'%PDF' in pdf_resp3.content[:10]:
+            logging.info("Tentative 3 OK")
+            return Response(
+                content=pdf_resp3.content,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition": f"inline; filename=\"{att_name}\"",
+                    "Access-Control-Allow-Origin": "*"
+                }
+            )
 
-        return Response(
-            content=pdf_resp.content,
-            media_type="application/pdf",
-            headers={
-                "Content-Disposition": f"inline; filename=\"{att_name}\"",
-                "Access-Control-Allow-Origin": "*"
-            }
-        )
+        logging.error(f"Toutes les tentatives ont échoué. Dernier contenu: {pdf_resp2.content[:200]}")
+        return Response(content=b"Erreur telechargement", status_code=500)
 
     except Exception as e:
         logging.error(f"get_pdf error: {e}")
