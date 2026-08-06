@@ -3,7 +3,8 @@ import xmlrpc.client
 import logging
 import secrets
 import re
-from fastapi import FastAPI
+import base64
+from fastapi import FastAPI, Form, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
@@ -73,10 +74,6 @@ class SubmitRequest(BaseModel):
 
 class RefuseRequest(BaseModel):
     remarques: Optional[str] = ""
-
-
-class SendDraftRequest(BaseModel):
-    event_id: int
 
 
 # ── ENDPOINTS ──────────────────────────────────────────────
@@ -226,7 +223,6 @@ def submit_rdv(req: SubmitRequest):
                 )
                 logging.info(f"Facture créée: {invoice_id}")
 
-                # ✅ Correction : x_studio_facture_liee au lieu de x_invoice_id
                 try:
                     models.execute_kw(
                         ODOO_DB, uid, ODOO_PASSWORD,
@@ -250,20 +246,44 @@ def submit_rdv(req: SubmitRequest):
 # ── DASHBOARD / WORKFLOW CLIENT ────────────────────────────
 
 @app.post("/pebepc/dashboard/send_draft")
-def send_draft(req: SendDraftRequest):
+async def send_draft(
+    event_id: int = Form(...),
+    pdf: UploadFile = File(...)
+):
     try:
         uid, models = odoo_connect()
         token = secrets.token_urlsafe(24)
-        logging.info(f"send_draft: event_id={req.event_id}, token={token}")
+        logging.info(f"send_draft: event_id={event_id}, token={token}, fichier={pdf.filename}")
 
+        # Lire le PDF et l'encoder en base64
+        pdf_bytes = await pdf.read()
+        pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+
+        # Attacher le PDF à l'événement dans Odoo
+        models.execute_kw(
+            ODOO_DB, uid, ODOO_PASSWORD,
+            "ir.attachment", "create",
+            [{
+                "name": pdf.filename or "PEB_provisoire.pdf",
+                "type": "binary",
+                "datas": pdf_b64,
+                "res_model": "calendar.event",
+                "res_id": event_id,
+                "mimetype": "application/pdf"
+            }]
+        )
+        logging.info("PDF attaché à l'événement Odoo")
+
+        # Mettre à jour le token et le statut
         models.execute_kw(
             ODOO_DB, uid, ODOO_PASSWORD,
             "calendar.event", "write",
-            [[req.event_id], {
+            [[event_id], {
                 "x_studio_client_token": token,
                 "x_studio_statut_draft": "draft_sent"
             }]
         )
+        logging.info(f"Statut mis à jour: draft_sent, token={token}")
 
         return {"success": True, "token": token}
 
