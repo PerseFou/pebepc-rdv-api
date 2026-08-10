@@ -311,34 +311,45 @@ async def send_final(
     event_id: int = Form(...),
     pdf: UploadFile = File(...)
 ):
+    """
+    1. Lit le PDF définitif
+    2. Le stocke dans x_studio_pdf_definitif via XML-RPC
+    3. Met le statut à closed
+    4. Envoie un mail au mandataire avec lien téléchargement
+    """
     try:
         uid, models = odoo_connect()
         logging.info(f"send_final: event_id={event_id}, fichier={pdf.filename}")
 
         pdf_bytes = await pdf.read()
         pdf_b64   = base64.b64encode(pdf_bytes).decode("utf-8")
-        logging.info(f"PDF definitif lu: {len(pdf_bytes)} octets")
 
-        # Stocker le PDF definitif via XML-RPC
-        models.execute_kw(
-            ODOO_DB, uid, ODOO_PASSWORD,
-            "calendar.event", "write",
-            [[event_id], {"x_studio_pdf_definitif": pdf_b64}]
-        )
-        logging.info("PDF definitif ecrit dans Odoo")
-
-        # Statut closed separement
-        models.execute_kw(
-            ODOO_DB, uid, ODOO_PASSWORD,
-            "calendar.event", "write",
-            [[event_id], {"x_studio_statut_draft": "closed"}]
-        )
+        # Stocker le PDF définitif + fermer la mission
+        try:
+            models.execute_kw(
+                ODOO_DB, uid, ODOO_PASSWORD,
+                "calendar.event", "write",
+                [[event_id], {
+                    "x_studio_pdf_definitif": pdf_b64,
+                    "x_studio_statut_draft":  "closed"
+                }]
+            )
+            logging.info("PDF définitif écrit dans Odoo")
+        except Exception as e:
+            # Si le champ x_studio_pdf_definitif n'existe pas encore, on écrit juste le statut
+            logging.warning(f"Champ pdf_definitif manquant, statut seul: {e}")
+            models.execute_kw(
+                ODOO_DB, uid, ODOO_PASSWORD,
+                "calendar.event", "write",
+                [[event_id], {"x_studio_statut_draft": "closed"}]
+            )
 
         infos        = get_mission_info(uid, models, event_id)
         client_email = infos.get("email", "")
         client_nom   = infos.get("nom", "le mandataire")
         adresse      = infos.get("adresse", "")
 
+        # Récupérer le token pour le lien PDF
         token_ev = models.execute_kw(
             ODOO_DB, uid, ODOO_PASSWORD,
             "calendar.event", "read",
@@ -346,24 +357,24 @@ async def send_final(
             {"fields": ["x_studio_client_token"]}
         )
         token    = token_ev[0].get("x_studio_client_token", "") if token_ev else ""
-        pdf_link = f"https://peb-pulls.odoo.com/rdv-client?token={token}" if token else ""
+        pdf_link = f"{RAILWAY_URL}/pebepc/mission/{token}/pdf/final" if token else ""
 
         if client_email:
-            subject   = "Votre certificat PEB definitif est disponible"
+            subject   = "Votre certificat PEB définitif est disponible"
             body_html = f"""
 <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
     <div style="background:linear-gradient(135deg,#059669,#10B981);padding:28px 32px;border-radius:12px 12px 0 0;">
-        <h1 style="color:#fff;font-size:1.4rem;margin:0;">Votre certificat PEB definitif est pret</h1>
+        <h1 style="color:#fff;font-size:1.4rem;margin:0;">✅ Votre certificat PEB définitif est prêt</h1>
     </div>
     <div style="background:#fff;padding:28px 32px;border:1px solid #e5e7eb;border-radius:0 0 12px 12px;">
         <p style="color:#374151;">Bonjour <strong>{client_nom}</strong>,</p>
-        <p style="color:#374151;">Votre certificat PEB <strong>definitif</strong> pour le bien situe au :</p>
+        <p style="color:#374151;">Votre certificat PEB <strong>définitif</strong> pour le bien situé au :</p>
         <p style="background:#f0fdf4;padding:12px;border-radius:8px;color:#16a34a;font-weight:bold;">{adresse}</p>
-        <p style="color:#374151;">est maintenant disponible. Vous pouvez le telecharger en cliquant ci-dessous.</p>
-        {"<div style='text-align:center;margin:28px 0;'><a href='" + pdf_link + "' style='background:#10B981;color:#fff;padding:14px 32px;border-radius:999px;text-decoration:none;font-weight:bold;font-size:1rem;'>Telecharger mon certificat PEB</a></div>" if pdf_link else ""}
+        <p style="color:#374151;">est maintenant disponible. Vous pouvez le télécharger en cliquant ci-dessous.</p>
+        {"<div style='text-align:center;margin:28px 0;'><a href='" + pdf_link + "' style='background:#10B981;color:#fff;padding:14px 32px;border-radius:999px;text-decoration:none;font-weight:bold;font-size:1rem;'>📥 Télécharger mon certificat PEB →</a></div>" if pdf_link else ""}
         <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;"/>
-        <p style="color:#8a9bb5;font-size:0.78rem;">Armine Sotodeh - Expert PEB<br/>
-        <a href="mailto:{ODOO_USER}" style="color:#10B981;">{ODOO_USER}</a></p>
+        <p style="color:#8a9bb5;font-size:0.78rem;">Armine Sotodeh — Expert PEB<br/>
+        <a href="mailto:{ODOO_USER}" style="color:#1B3A8C;">{ODOO_USER}</a></p>
     </div>
 </div>"""
             send_odoo_mail(uid, models, client_email, subject, body_html)
@@ -400,7 +411,7 @@ def get_pdf_provisoire(token: str):
         pdf_b64 = ev.get("x_studio_pdf_provisoire")
 
         if not pdf_b64:
-            return Response(content=b"Aucun PDF provisoire disponible", status_code=404)
+            return Response(content="Aucun PDF provisoire disponible".encode(), status_code=404)
 
         pdf_bytes = base64.b64decode(pdf_b64)
         filename  = f"PEB_provisoire_{ev['id']}.pdf"
