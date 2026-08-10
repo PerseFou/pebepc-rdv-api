@@ -346,7 +346,7 @@ async def send_final(
             {"fields": ["x_studio_client_token"]}
         )
         token    = token_ev[0].get("x_studio_client_token", "") if token_ev else ""
-        pdf_link = f"{RAILWAY_URL}/pebepc/mission/{token}/pdf/final" if token else ""
+        pdf_link = f"https://peb-pulls.odoo.com/rdv-client?token={token}" if token else ""
 
         if client_email:
             subject   = "Votre certificat PEB definitif est disponible"
