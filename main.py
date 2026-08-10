@@ -36,7 +36,7 @@ def odoo_connect():
     uid = common.authenticate(ODOO_DB, ODOO_USER, ODOO_PASSWORD, {})
     logging.info(f"UID obtenu: {uid}")
     if not uid:
-        raise Exception("Authentification Odoo échouée")
+        raise Exception("Authentification Odoo echouee")
     models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
     return uid, models
 
@@ -52,7 +52,6 @@ def get_mission_info(uid, models, event_id):
         return {}
     ev = events[0]
     infos = ev.get("x_studio_informations_sur_le_bien", "") or ""
-
     client_nom, client_email, client_tel = "", "", ""
     mand = infos.split("MANDATAIRE")
     if len(mand) > 1:
@@ -62,7 +61,6 @@ def get_mission_info(uid, models, event_id):
         if em: client_email = em.group(1).strip()
         pm = re.search(r"T.l\s*:\s*(.+)", mand[1])
         if pm: client_tel = pm.group(1).strip()
-
     return {
         "nom":     client_nom,
         "email":   client_email,
@@ -85,19 +83,15 @@ def send_odoo_mail(uid, models, email_to, subject, body_html):
                 "auto_delete": True
             }]
         )
-        models.execute_kw(
-            ODOO_DB, uid, ODOO_PASSWORD,
-            "mail.mail", "send",
-            [[mail_id]]
-        )
-        logging.info(f"Mail envoyé à {email_to}")
+        models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "mail.mail", "send", [[mail_id]])
+        logging.info(f"Mail envoye a {email_to}")
         return True
     except Exception as e:
         logging.error(f"Erreur envoi mail: {e}")
         return False
 
 
-# ── MODÈLES ────────────────────────────────────────────────
+# ── MODELES ────────────────────────────────────────────────
 
 class TakenSlotsRequest(BaseModel):
     start: str
@@ -151,7 +145,7 @@ def taken_slots(req: TakenSlotsRequest):
             [[["start", ">=", req.start], ["stop", "<=", req.stop], ["active", "=", True]]],
             {"fields": ["start", "stop"], "limit": 500}
         )
-        logging.info(f"taken_slots: {len(events)} événements trouvés")
+        logging.info(f"taken_slots: {len(events)} evenements trouves")
         return {"slots": [{"start": e["start"], "stop": e["stop"], "expertEmail": ODOO_USER} for e in (events or [])]}
     except Exception as e:
         logging.error(f"taken_slots error: {e}")
@@ -161,7 +155,7 @@ def taken_slots(req: TakenSlotsRequest):
 @app.post("/pebepc/rdv/submit")
 def submit_rdv(req: SubmitRequest):
     try:
-        logging.info(f"submit_rdv reçu: {req.prenom} {req.nom} / {req.email}")
+        logging.info(f"submit_rdv recu: {req.prenom} {req.nom} / {req.email}")
         uid, models = odoo_connect()
 
         def find_or_create_partner(email, name, phone=""):
@@ -178,24 +172,24 @@ def submit_rdv(req: SubmitRequest):
         adresse = req.rue + (f", {req.boite}" if req.boite else "") + f", {req.cp} {req.ville}"
 
         gestion = req.gestion_type or ""
-        x_infos = "AGENCE\n" if gestion == "Agence" else "PROPRIÉTAIRE\n"
+        x_infos = "AGENCE\n" if gestion == "Agence" else "PROPRIETAIRE\n"
         if req.contact_place_nom:   x_infos += f"Nom : {req.contact_place_nom}\n"
-        if req.contact_place_tel:   x_infos += f"Tél : {req.contact_place_tel}\n"
+        if req.contact_place_tel:   x_infos += f"Tel : {req.contact_place_tel}\n"
         if req.contact_place_email: x_infos += f"Email : {req.contact_place_email}\n"
         x_infos += f"\nBIEN\nType : {req.type_bien}\nSuperficie : {req.superficie}"
-        x_infos += f"\n\nMANDATAIRE\nNom : {req.prenom} {req.nom}\nTél : {req.tel}\nEmail : {req.email}"
+        x_infos += f"\n\nMANDATAIRE\nNom : {req.prenom} {req.nom}\nTel : {req.tel}\nEmail : {req.email}"
 
         partner_ids = [expert_id]
         if client_id and client_id != expert_id: partner_ids.append(client_id)
         if place_id and place_id not in partner_ids: partner_ids.append(place_id)
 
         event_id = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "create", [{
-    "name": f"PEB — {req.type_bien} {req.superficie} — {adresse}",
-    "start": req.start_utc, "stop": req.stop_utc,
-    "description": f"Creneau : {req.creneau_label}\nAdresse : {adresse}\n\n{x_infos}",
-    "partner_ids": [[6, 0, partner_ids]],
-    "privacy": "confidential"
-}], {"context": {"no_mail_to_attendees": True}})
+            "name": f"PEB — {req.type_bien} {req.superficie} — {adresse}",
+            "start": req.start_utc, "stop": req.stop_utc,
+            "description": f"Creneau : {req.creneau_label}\nAdresse : {adresse}\n\n{x_infos}",
+            "partner_ids": [[6, 0, partner_ids]],
+            "privacy": "confidential"
+        }], {"context": {"no_mail_to_attendees": True}})
 
         try:
             models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "write", [[event_id], {
@@ -221,20 +215,18 @@ def submit_rdv(req: SubmitRequest):
                 }])
                 models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "write", [[event_id], {"x_studio_facture_liee": invoice_id}])
             except Exception as e:
-                logging.warning(f"Création facture: {e}")
+                logging.warning(f"Creation facture: {e}")
 
-        return {"success": True, "event_id": event_id, "invoice_id": invoice_id}
-
-        # ── Mail de notification à Armine ──
-subject_expert = f"Nouveau RDV PEB — {req.prenom} {req.nom}"
-body_expert = f"""<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+        # ── Mail notification Armine ──
+        subject_expert = f"Nouveau RDV PEB - {req.prenom} {req.nom}"
+        body_expert = f"""<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
     <div style="background:linear-gradient(135deg,#1B3A8C,#3B82F6);padding:24px 28px;border-radius:12px 12px 0 0;">
         <h1 style="color:#fff;font-size:1.2rem;margin:0;">Nouveau RDV PEB enregistre</h1>
     </div>
     <div style="background:#fff;padding:24px 28px;border:1px solid #e5e7eb;border-radius:0 0 12px 12px;">
         <p style="color:#374151;"><strong>{req.prenom} {req.nom}</strong> vient de prendre un RDV.</p>
         <table style="width:100%;border-collapse:collapse;margin:16px 0;">
-            <tr><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Type</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.type_bien} — {req.superficie}</td></tr>
+            <tr><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Type</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.type_bien} - {req.superficie}</td></tr>
             <tr style="background:#f4f6fb;"><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Adresse</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{adresse}</td></tr>
             <tr><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Creneau</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.creneau_label}</td></tr>
             <tr style="background:#f4f6fb;"><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Tel</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.tel}</td></tr>
@@ -245,11 +237,11 @@ body_expert = f"""<div style="font-family:Arial,sans-serif;max-width:600px;margi
         </div>
     </div>
 </div>"""
-send_odoo_mail(uid, models, ODOO_USER, subject_expert, body_expert)
+        send_odoo_mail(uid, models, ODOO_USER, subject_expert, body_expert)
 
-# ── Mail de confirmation au client ──
-subject_client = "Confirmation de votre demande de RDV PEB"
-body_client = f"""<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+        # ── Mail confirmation client ──
+        subject_client = "Confirmation de votre demande de RDV PEB"
+        body_client = f"""<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
     <div style="background:linear-gradient(135deg,#1B3A8C,#3B82F6);padding:24px 28px;border-radius:12px 12px 0 0;">
         <h1 style="color:#fff;font-size:1.2rem;margin:0;">Votre demande de RDV a bien ete enregistree</h1>
     </div>
@@ -258,16 +250,18 @@ body_client = f"""<div style="font-family:Arial,sans-serif;max-width:600px;margi
         <p style="color:#374151;">Nous avons bien recu votre demande de RDV pour la certification PEB du bien situe au :</p>
         <p style="background:#f4f6fb;padding:12px;border-radius:8px;color:#1B3A8C;font-weight:bold;">{adresse}</p>
         <table style="width:100%;border-collapse:collapse;margin:16px 0;">
-            <tr><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Type de bien</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.type_bien} — {req.superficie}</td></tr>
+            <tr><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Type de bien</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.type_bien} - {req.superficie}</td></tr>
             <tr style="background:#f4f6fb;"><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Creneau souhaite</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.creneau_label}</td></tr>
         </table>
         <p style="color:#374151;">Notre expert vous contactera prochainement pour confirmer le rendez-vous.</p>
         <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;"/>
-        <p style="color:#8a9bb5;font-size:0.78rem;">Armine Sotodeh — Expert PEB<br/>
+        <p style="color:#8a9bb5;font-size:0.78rem;">Armine Sotodeh - Expert PEB<br/>
         <a href="mailto:{ODOO_USER}" style="color:#1B3A8C;">{ODOO_USER}</a></p>
     </div>
 </div>"""
-send_odoo_mail(uid, models, req.email, subject_client, body_client)
+        send_odoo_mail(uid, models, req.email, subject_client, body_client)
+
+        return {"success": True, "event_id": event_id, "invoice_id": invoice_id}
 
     except Exception as e:
         logging.error(f"submit_rdv error: {e}")
@@ -281,13 +275,6 @@ async def send_draft(
     event_id: int = Form(...),
     pdf: UploadFile = File(...)
 ):
-    """
-    1. Lit le PDF uploadé
-    2. Encode en base64 et le stocke dans x_studio_pdf_provisoire via XML-RPC
-    3. Génère un token unique
-    4. Met le statut à draft_sent
-    5. Envoie un mail au mandataire avec le lien
-    """
     try:
         uid, models = odoo_connect()
         token = secrets.token_urlsafe(24)
@@ -295,21 +282,14 @@ async def send_draft(
 
         pdf_bytes = await pdf.read()
         pdf_b64   = base64.b64encode(pdf_bytes).decode("utf-8")
-        logging.info(f"PDF lu: {len(pdf_bytes)} octets")
 
-        # ✅ Stocker le PDF en base64 dans Odoo via XML-RPC (pas de HTTP)
-        models.execute_kw(
-            ODOO_DB, uid, ODOO_PASSWORD,
-            "calendar.event", "write",
-            [[event_id], {
-                "x_studio_client_token":   token,
-                "x_studio_statut_draft":   "draft_sent",
-                "x_studio_pdf_provisoire": pdf_b64
-            }]
-        )
-        logging.info("PDF provisoire + token écrits dans Odoo")
+        models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "write", [[event_id], {
+            "x_studio_client_token":   token,
+            "x_studio_statut_draft":   "draft_sent",
+            "x_studio_pdf_provisoire": pdf_b64
+        }])
+        logging.info("PDF provisoire + token ecrits dans Odoo")
 
-        # Récupérer infos mandataire pour le mail
         infos        = get_mission_info(uid, models, event_id)
         client_email = infos.get("email", "")
         client_nom   = infos.get("nom", "le mandataire")
@@ -318,31 +298,24 @@ async def send_draft(
 
         if client_email:
             subject   = "Votre PEB provisoire est disponible"
-            body_html = f"""
-<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+            body_html = f"""<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
     <div style="background:linear-gradient(135deg,#1B3A8C,#3B82F6);padding:28px 32px;border-radius:12px 12px 0 0;">
-        <h1 style="color:#fff;font-size:1.4rem;margin:0;">📄 Votre PEB provisoire est prêt</h1>
+        <h1 style="color:#fff;font-size:1.4rem;margin:0;">Votre PEB provisoire est pret</h1>
     </div>
     <div style="background:#fff;padding:28px 32px;border:1px solid #e5e7eb;border-radius:0 0 12px 12px;">
         <p style="color:#374151;">Bonjour <strong>{client_nom}</strong>,</p>
-        <p style="color:#374151;">Votre certificat PEB provisoire pour le bien situé au :</p>
+        <p style="color:#374151;">Votre certificat PEB provisoire pour le bien situe au :</p>
         <p style="background:#f4f6fb;padding:12px;border-radius:8px;color:#1B3A8C;font-weight:bold;">{adresse}</p>
-        <p style="color:#374151;">est maintenant disponible. Veuillez le consulter et nous indiquer si vous l'acceptez ou souhaitez des modifications.</p>
+        <p style="color:#374151;">est maintenant disponible.</p>
         <div style="text-align:center;margin:28px 0;">
-            <a href="{client_link}" style="background:#1B3A8C;color:#fff;padding:14px 32px;border-radius:999px;text-decoration:none;font-weight:bold;font-size:1rem;">
-                Consulter mon PEB provisoire →
-            </a>
+            <a href="{client_link}" style="background:#1B3A8C;color:#fff;padding:14px 32px;border-radius:999px;text-decoration:none;font-weight:bold;font-size:1rem;">Consulter mon PEB provisoire</a>
         </div>
-        <p style="color:#8a9bb5;font-size:0.82rem;">Si le bouton ne fonctionne pas, copiez ce lien :<br/>
-        <a href="{client_link}" style="color:#1B3A8C;">{client_link}</a></p>
+        <p style="color:#8a9bb5;font-size:0.82rem;">Lien : <a href="{client_link}" style="color:#1B3A8C;">{client_link}</a></p>
         <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;"/>
-        <p style="color:#8a9bb5;font-size:0.78rem;">Armine Sotodeh — Expert PEB<br/>
-        <a href="mailto:{ODOO_USER}" style="color:#1B3A8C;">{ODOO_USER}</a></p>
+        <p style="color:#8a9bb5;font-size:0.78rem;">Armine Sotodeh - Expert PEB</p>
     </div>
 </div>"""
             send_odoo_mail(uid, models, client_email, subject, body_html)
-        else:
-            logging.warning(f"Pas d'email trouvé pour event_id={event_id}")
 
         return {"success": True, "token": token, "mail_sent": bool(client_email)}
 
@@ -356,12 +329,6 @@ async def send_final(
     event_id: int = Form(...),
     pdf: UploadFile = File(...)
 ):
-    """
-    1. Lit le PDF définitif
-    2. Le stocke dans x_studio_pdf_definitif via XML-RPC
-    3. Met le statut à closed
-    4. Envoie un mail au mandataire avec lien téléchargement
-    """
     try:
         uid, models = odoo_connect()
         logging.info(f"send_final: event_id={event_id}, fichier={pdf.filename}")
@@ -369,57 +336,32 @@ async def send_final(
         pdf_bytes = await pdf.read()
         pdf_b64   = base64.b64encode(pdf_bytes).decode("utf-8")
 
-        # Stocker le PDF définitif + fermer la mission
-        try:
-            models.execute_kw(
-                ODOO_DB, uid, ODOO_PASSWORD,
-                "calendar.event", "write",
-                [[event_id], {
-                    "x_studio_pdf_definitif": pdf_b64,
-                    "x_studio_statut_draft":  "closed"
-                }]
-            )
-            logging.info("PDF définitif écrit dans Odoo")
-        except Exception as e:
-            # Si le champ x_studio_pdf_definitif n'existe pas encore, on écrit juste le statut
-            logging.warning(f"Champ pdf_definitif manquant, statut seul: {e}")
-            models.execute_kw(
-                ODOO_DB, uid, ODOO_PASSWORD,
-                "calendar.event", "write",
-                [[event_id], {"x_studio_statut_draft": "closed"}]
-            )
+        models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "write", [[event_id], {"x_studio_pdf_definitif": pdf_b64}])
+        models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "write", [[event_id], {"x_studio_statut_draft": "closed"}])
+        logging.info("PDF definitif + statut closed ecrits dans Odoo")
 
         infos        = get_mission_info(uid, models, event_id)
         client_email = infos.get("email", "")
         client_nom   = infos.get("nom", "le mandataire")
         adresse      = infos.get("adresse", "")
 
-        # Récupérer le token pour le lien PDF
-        token_ev = models.execute_kw(
-            ODOO_DB, uid, ODOO_PASSWORD,
-            "calendar.event", "read",
-            [[event_id]],
-            {"fields": ["x_studio_client_token"]}
-        )
+        token_ev = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "read", [[event_id]], {"fields": ["x_studio_client_token"]})
         token    = token_ev[0].get("x_studio_client_token", "") if token_ev else ""
-        pdf_link = f"{RAILWAY_URL}/pebepc/mission/{token}/pdf/final" if token else ""
+        pdf_link = f"https://peb-pulls.odoo.com/rdv-client?token={token}" if token else ""
 
         if client_email:
-            subject   = "Votre certificat PEB définitif est disponible"
-            body_html = f"""
-<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+            subject   = "Votre certificat PEB definitif est disponible"
+            body_html = f"""<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
     <div style="background:linear-gradient(135deg,#059669,#10B981);padding:28px 32px;border-radius:12px 12px 0 0;">
-        <h1 style="color:#fff;font-size:1.4rem;margin:0;">✅ Votre certificat PEB définitif est prêt</h1>
+        <h1 style="color:#fff;font-size:1.4rem;margin:0;">Votre certificat PEB definitif est pret</h1>
     </div>
     <div style="background:#fff;padding:28px 32px;border:1px solid #e5e7eb;border-radius:0 0 12px 12px;">
         <p style="color:#374151;">Bonjour <strong>{client_nom}</strong>,</p>
-        <p style="color:#374151;">Votre certificat PEB <strong>définitif</strong> pour le bien situé au :</p>
+        <p style="color:#374151;">Votre certificat PEB <strong>definitif</strong> pour le bien situe au :</p>
         <p style="background:#f0fdf4;padding:12px;border-radius:8px;color:#16a34a;font-weight:bold;">{adresse}</p>
-        <p style="color:#374151;">est maintenant disponible. Vous pouvez le télécharger en cliquant ci-dessous.</p>
-        {"<div style='text-align:center;margin:28px 0;'><a href='" + pdf_link + "' style='background:#10B981;color:#fff;padding:14px 32px;border-radius:999px;text-decoration:none;font-weight:bold;font-size:1rem;'>📥 Télécharger mon certificat PEB →</a></div>" if pdf_link else ""}
+        {"<div style='text-align:center;margin:28px 0;'><a href='" + pdf_link + "' style='background:#10B981;color:#fff;padding:14px 32px;border-radius:999px;text-decoration:none;font-weight:bold;font-size:1rem;'>Telecharger mon certificat PEB</a></div>" if pdf_link else ""}
         <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;"/>
-        <p style="color:#8a9bb5;font-size:0.78rem;">Armine Sotodeh — Expert PEB<br/>
-        <a href="mailto:{ODOO_USER}" style="color:#1B3A8C;">{ODOO_USER}</a></p>
+        <p style="color:#8a9bb5;font-size:0.78rem;">Armine Sotodeh - Expert PEB</p>
     </div>
 </div>"""
             send_odoo_mail(uid, models, client_email, subject, body_html)
@@ -431,46 +373,24 @@ async def send_final(
         return {"success": False, "error": str(e)}
 
 
-# ── SERVIR LE PDF DEPUIS ODOO VIA XML-RPC ─────────────────
+# ── SERVIR LES PDFs ────────────────────────────────────────
 
 @app.get("/pebepc/mission/{token}/pdf")
 def get_pdf_provisoire(token: str):
-    """
-    Récupère le PDF provisoire depuis le champ x_studio_pdf_provisoire
-    via XML-RPC (pas de HTTP vers Odoo — contourne le blocage SaaS).
-    """
     try:
         uid, models = odoo_connect()
-
-        events = models.execute_kw(
-            ODOO_DB, uid, ODOO_PASSWORD,
-            "calendar.event", "search_read",
+        events = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "search_read",
             [[["x_studio_client_token", "=", token], ["active", "=", True]]],
-            {"fields": ["id", "name", "x_studio_pdf_provisoire"], "limit": 1}
-        )
-
+            {"fields": ["id", "name", "x_studio_pdf_provisoire"], "limit": 1})
         if not events:
             return Response(content=b"Mission introuvable", status_code=404)
-
         ev      = events[0]
         pdf_b64 = ev.get("x_studio_pdf_provisoire")
-
         if not pdf_b64:
-            return Response(content="Aucun PDF provisoire disponible".encode(), status_code=404)
-
+            return Response(content=b"Aucun PDF provisoire disponible", status_code=404)
         pdf_bytes = base64.b64decode(pdf_b64)
-        filename  = f"PEB_provisoire_{ev['id']}.pdf"
-
-        logging.info(f"PDF provisoire servi: {len(pdf_bytes)} octets pour token={token}")
-        return Response(
-            content=pdf_bytes,
-            media_type="application/pdf",
-            headers={
-                "Content-Disposition": f"inline; filename=\"{filename}\"",
-                "Access-Control-Allow-Origin": "*"
-            }
-        )
-
+        return Response(content=pdf_bytes, media_type="application/pdf",
+            headers={"Content-Disposition": f"inline; filename=\"PEB_provisoire_{ev['id']}.pdf\"", "Access-Control-Allow-Origin": "*"})
     except Exception as e:
         logging.error(f"get_pdf_provisoire error: {e}")
         return Response(content=str(e).encode(), status_code=500)
@@ -478,41 +398,20 @@ def get_pdf_provisoire(token: str):
 
 @app.get("/pebepc/mission/{token}/pdf/final")
 def get_pdf_definitif(token: str):
-    """
-    Récupère le PDF définitif depuis x_studio_pdf_definitif via XML-RPC.
-    """
     try:
         uid, models = odoo_connect()
-
-        events = models.execute_kw(
-            ODOO_DB, uid, ODOO_PASSWORD,
-            "calendar.event", "search_read",
+        events = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "search_read",
             [[["x_studio_client_token", "=", token], ["active", "=", True]]],
-            {"fields": ["id", "name", "x_studio_pdf_definitif"], "limit": 1}
-        )
-
+            {"fields": ["id", "name", "x_studio_pdf_definitif"], "limit": 1})
         if not events:
             return Response(content=b"Mission introuvable", status_code=404)
-
         ev      = events[0]
         pdf_b64 = ev.get("x_studio_pdf_definitif")
-
         if not pdf_b64:
             return Response(content="Aucun PDF definitif disponible".encode(), status_code=404)
-
         pdf_bytes = base64.b64decode(pdf_b64)
-        filename  = f"PEB_definitif_{ev['id']}.pdf"
-
-        logging.info(f"PDF définitif servi: {len(pdf_bytes)} octets pour token={token}")
-        return Response(
-            content=pdf_bytes,
-            media_type="application/pdf",
-            headers={
-                "Content-Disposition": f"inline; filename=\"{filename}\"",
-                "Access-Control-Allow-Origin": "*"
-            }
-        )
-
+        return Response(content=pdf_bytes, media_type="application/pdf",
+            headers={"Content-Disposition": f"inline; filename=\"PEB_definitif_{ev['id']}.pdf\"", "Access-Control-Allow-Origin": "*"})
     except Exception as e:
         logging.error(f"get_pdf_definitif error: {e}")
         return Response(content=str(e).encode(), status_code=500)
@@ -524,22 +423,16 @@ def get_pdf_definitif(token: str):
 def get_mission(token: str):
     try:
         uid, models = odoo_connect()
-        events = models.execute_kw(
-            ODOO_DB, uid, ODOO_PASSWORD,
-            "calendar.event", "search_read",
+        events = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "search_read",
             [[["x_studio_client_token", "=", token], ["active", "=", True]]],
             {"fields": ["id", "name", "start", "x_studio_adresse_du_bien",
                         "x_studio_informations_sur_le_bien", "x_studio_statut_draft",
-                        "x_studio_remarques_client", "x_studio_pdf_provisoire"], "limit": 1}
-        )
-
+                        "x_studio_remarques_client", "x_studio_pdf_provisoire"], "limit": 1})
         if not events:
             return {"success": False, "error": "Mission introuvable"}
-
         ev    = events[0]
         infos = ev.get("x_studio_informations_sur_le_bien", "") or ""
         type_bien = superficie = client_nom = ""
-
         tm = re.search(r"Type\s*:\s*(.+)", infos)
         if tm: type_bien = tm.group(1).strip()
         sm = re.search(r"Superficie\s*:\s*(.+)", infos)
@@ -548,7 +441,6 @@ def get_mission(token: str):
         if len(mand) > 1:
             nm = re.search(r"Nom\s*:\s*(.+)", mand[1])
             if nm: client_nom = nm.group(1).strip()
-
         return {
             "success": True,
             "mission": {
@@ -564,7 +456,6 @@ def get_mission(token: str):
                 "has_pdf":    bool(ev.get("x_studio_pdf_provisoire"))
             }
         }
-
     except Exception as e:
         logging.error(f"get_mission error: {e}")
         return {"success": False, "error": str(e)}
@@ -574,18 +465,34 @@ def get_mission(token: str):
 def accept_mission(token: str):
     try:
         uid, models = odoo_connect()
-        events = models.execute_kw(
-            ODOO_DB, uid, ODOO_PASSWORD,
-            "calendar.event", "search_read",
+        events = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "search_read",
             [[["x_studio_client_token", "=", token], ["active", "=", True]]],
-            {"fields": ["id"], "limit": 1}
-        )
+            {"fields": ["id"], "limit": 1})
         if not events:
             return {"success": False, "error": "Mission introuvable"}
         event_id = events[0]["id"]
         models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "write",
             [[event_id], {"x_studio_statut_draft": "draft_accepted"}])
-        logging.info(f"Mission {event_id} acceptée")
+
+        infos      = get_mission_info(uid, models, event_id)
+        adresse    = infos.get("adresse", "")
+        client_nom = infos.get("nom", "Le client")
+        subject    = "PEB provisoire accepte par le client"
+        body_html  = f"""<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+    <div style="background:linear-gradient(135deg,#059669,#10B981);padding:24px 28px;border-radius:12px 12px 0 0;">
+        <h1 style="color:#fff;font-size:1.2rem;margin:0;">Le client a accepte le PEB provisoire</h1>
+    </div>
+    <div style="background:#fff;padding:24px 28px;border:1px solid #e5e7eb;border-radius:0 0 12px 12px;">
+        <p style="color:#374151;"><strong>{client_nom}</strong> a accepte le PEB provisoire pour :</p>
+        <p style="background:#f0fdf4;padding:12px;border-radius:8px;color:#16a34a;font-weight:bold;">{adresse}</p>
+        <p style="color:#374151;">Vous pouvez maintenant envoyer le PEB definitif depuis le dashboard.</p>
+        <div style="text-align:center;margin:20px 0;">
+            <a href="https://peb-pulls.odoo.com/peb-dashboard" style="background:#1B3A8C;color:#fff;padding:12px 28px;border-radius:999px;text-decoration:none;font-weight:bold;">Voir le dashboard</a>
+        </div>
+    </div>
+</div>"""
+        send_odoo_mail(uid, models, ODOO_USER, subject, body_html)
+        logging.info(f"Mission {event_id} acceptee")
         return {"success": True}
     except Exception as e:
         logging.error(f"accept_mission error: {e}")
@@ -596,12 +503,9 @@ def accept_mission(token: str):
 def refuse_mission(token: str, req: RefuseRequest):
     try:
         uid, models = odoo_connect()
-        events = models.execute_kw(
-            ODOO_DB, uid, ODOO_PASSWORD,
-            "calendar.event", "search_read",
+        events = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "search_read",
             [[["x_studio_client_token", "=", token], ["active", "=", True]]],
-            {"fields": ["id"], "limit": 1}
-        )
+            {"fields": ["id"], "limit": 1})
         if not events:
             return {"success": False, "error": "Mission introuvable"}
         event_id = events[0]["id"]
@@ -610,7 +514,29 @@ def refuse_mission(token: str, req: RefuseRequest):
                 "x_studio_statut_draft":     "draft_refused",
                 "x_studio_remarques_client": req.remarques or ""
             }])
-        logging.info(f"Mission {event_id} refusée")
+
+        infos      = get_mission_info(uid, models, event_id)
+        adresse    = infos.get("adresse", "")
+        client_nom = infos.get("nom", "Le client")
+        remarques  = req.remarques or "Aucune remarque fournie."
+        subject    = "PEB provisoire refuse par le client"
+        body_html  = f"""<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+    <div style="background:linear-gradient(135deg,#DC2626,#EF4444);padding:24px 28px;border-radius:12px 12px 0 0;">
+        <h1 style="color:#fff;font-size:1.2rem;margin:0;">Le client a refuse le PEB provisoire</h1>
+    </div>
+    <div style="background:#fff;padding:24px 28px;border:1px solid #e5e7eb;border-radius:0 0 12px 12px;">
+        <p style="color:#374151;"><strong>{client_nom}</strong> a refuse le PEB provisoire pour :</p>
+        <p style="background:#fef2f2;padding:12px;border-radius:8px;color:#dc2626;font-weight:bold;">{adresse}</p>
+        <p style="color:#374151;font-weight:700;">Remarques du client :</p>
+        <p style="background:#fff8e7;padding:12px;border-radius:8px;color:#92610a;border:1px solid #f9ca66;">{remarques}</p>
+        <p style="color:#374151;">Apportez les corrections et renvoyez un nouveau PEB provisoire.</p>
+        <div style="text-align:center;margin:20px 0;">
+            <a href="https://peb-pulls.odoo.com/peb-dashboard" style="background:#1B3A8C;color:#fff;padding:12px 28px;border-radius:999px;text-decoration:none;font-weight:bold;">Voir le dashboard</a>
+        </div>
+    </div>
+</div>"""
+        send_odoo_mail(uid, models, ODOO_USER, subject, body_html)
+        logging.info(f"Mission {event_id} refusee")
         return {"success": True}
     except Exception as e:
         logging.error(f"refuse_mission error: {e}")
