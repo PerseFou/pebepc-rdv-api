@@ -308,8 +308,8 @@ async def send_draft(
         <p style="background:#f4f6fb;padding:12px;border-radius:8px;color:#1B3A8C;font-weight:bold;">{adresse}</p>
         <p style="color:#374151;">est maintenant disponible.</p>
         <div style="text-align:center;margin:28px 0;">
-            <a href="{client_link}" style="background:#1B3A8C;color:#fff;padding:14px 32px;border-radius:999px;text-decoration:none;font-weight:bold;font-size:1rem;">Consulter mon PEB provisoire</a>
-        </div>
+    <a href="{client_link}" style="background:#1B3A8C;color:#fff;padding:14px 20px;border-radius:12px;text-decoration:none;font-weight:bold;font-size:0.95rem;display:inline-block;max-width:90%;word-break:break-word;">Consulter mon PEB provisoire</a>
+</div>
         <p style="color:#8a9bb5;font-size:0.82rem;">Lien : <a href="{client_link}" style="color:#1B3A8C;">{client_link}</a></p>
         <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;"/>
         <p style="color:#8a9bb5;font-size:0.78rem;">Armine Sotodeh - Expert PEB</p>
@@ -359,7 +359,7 @@ async def send_final(
         <p style="color:#374151;">Bonjour <strong>{client_nom}</strong>,</p>
         <p style="color:#374151;">Votre certificat PEB <strong>definitif</strong> pour le bien situe au :</p>
         <p style="background:#f0fdf4;padding:12px;border-radius:8px;color:#16a34a;font-weight:bold;">{adresse}</p>
-        {"<div style='text-align:center;margin:28px 0;'><a href='" + pdf_link + "' style='background:#10B981;color:#fff;padding:14px 32px;border-radius:999px;text-decoration:none;font-weight:bold;font-size:1rem;'>Telecharger mon certificat PEB</a></div>" if pdf_link else ""}
+        {"<div style='text-align:center;margin:28px 0;'><a href='" + pdf_link + "' style='background:#10B981;color:#fff;padding:14px 20px;border-radius:12px;text-decoration:none;font-weight:bold;font-size:0.95rem;display:inline-block;max-width:90%;word-break:break-word;'>Telecharger mon certificat PEB</a></div>" if pdf_link else ""}
         <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;"/>
         <p style="color:#8a9bb5;font-size:0.78rem;">Armine Sotodeh - Expert PEB</p>
     </div>
