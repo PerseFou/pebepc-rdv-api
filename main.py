@@ -190,11 +190,12 @@ def submit_rdv(req: SubmitRequest):
         if place_id and place_id not in partner_ids: partner_ids.append(place_id)
 
         event_id = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "create", [{
-            "name": f"PEB — {req.type_bien} {req.superficie} — {adresse}",
-            "start": req.start_utc, "stop": req.stop_utc,
-            "description": f"Créneau : {req.creneau_label}\nAdresse : {adresse}\n\n{x_infos}",
-            "partner_ids": [[6, 0, partner_ids]]
-        }])
+    "name": f"PEB — {req.type_bien} {req.superficie} — {adresse}",
+    "start": req.start_utc, "stop": req.stop_utc,
+    "description": f"Creneau : {req.creneau_label}\nAdresse : {adresse}\n\n{x_infos}",
+    "partner_ids": [[6, 0, partner_ids]],
+    "privacy": "confidential"
+}], {"context": {"no_mail_to_attendees": True}})
 
         try:
             models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "write", [[event_id], {
@@ -223,6 +224,50 @@ def submit_rdv(req: SubmitRequest):
                 logging.warning(f"Création facture: {e}")
 
         return {"success": True, "event_id": event_id, "invoice_id": invoice_id}
+
+        # ── Mail de notification à Armine ──
+subject_expert = f"Nouveau RDV PEB — {req.prenom} {req.nom}"
+body_expert = f"""<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+    <div style="background:linear-gradient(135deg,#1B3A8C,#3B82F6);padding:24px 28px;border-radius:12px 12px 0 0;">
+        <h1 style="color:#fff;font-size:1.2rem;margin:0;">Nouveau RDV PEB enregistre</h1>
+    </div>
+    <div style="background:#fff;padding:24px 28px;border:1px solid #e5e7eb;border-radius:0 0 12px 12px;">
+        <p style="color:#374151;"><strong>{req.prenom} {req.nom}</strong> vient de prendre un RDV.</p>
+        <table style="width:100%;border-collapse:collapse;margin:16px 0;">
+            <tr><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Type</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.type_bien} — {req.superficie}</td></tr>
+            <tr style="background:#f4f6fb;"><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Adresse</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{adresse}</td></tr>
+            <tr><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Creneau</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.creneau_label}</td></tr>
+            <tr style="background:#f4f6fb;"><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Tel</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.tel}</td></tr>
+            <tr><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Email</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.email}</td></tr>
+        </table>
+        <div style="text-align:center;margin:20px 0;">
+            <a href="https://peb-pulls.odoo.com/peb-dashboard" style="background:#1B3A8C;color:#fff;padding:12px 28px;border-radius:999px;text-decoration:none;font-weight:bold;">Voir le dashboard</a>
+        </div>
+    </div>
+</div>"""
+send_odoo_mail(uid, models, ODOO_USER, subject_expert, body_expert)
+
+# ── Mail de confirmation au client ──
+subject_client = "Confirmation de votre demande de RDV PEB"
+body_client = f"""<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+    <div style="background:linear-gradient(135deg,#1B3A8C,#3B82F6);padding:24px 28px;border-radius:12px 12px 0 0;">
+        <h1 style="color:#fff;font-size:1.2rem;margin:0;">Votre demande de RDV a bien ete enregistree</h1>
+    </div>
+    <div style="background:#fff;padding:24px 28px;border:1px solid #e5e7eb;border-radius:0 0 12px 12px;">
+        <p style="color:#374151;">Bonjour <strong>{req.prenom} {req.nom}</strong>,</p>
+        <p style="color:#374151;">Nous avons bien recu votre demande de RDV pour la certification PEB du bien situe au :</p>
+        <p style="background:#f4f6fb;padding:12px;border-radius:8px;color:#1B3A8C;font-weight:bold;">{adresse}</p>
+        <table style="width:100%;border-collapse:collapse;margin:16px 0;">
+            <tr><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Type de bien</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.type_bien} — {req.superficie}</td></tr>
+            <tr style="background:#f4f6fb;"><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Creneau souhaite</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.creneau_label}</td></tr>
+        </table>
+        <p style="color:#374151;">Notre expert vous contactera prochainement pour confirmer le rendez-vous.</p>
+        <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;"/>
+        <p style="color:#8a9bb5;font-size:0.78rem;">Armine Sotodeh — Expert PEB<br/>
+        <a href="mailto:{ODOO_USER}" style="color:#1B3A8C;">{ODOO_USER}</a></p>
+    </div>
+</div>"""
+send_odoo_mail(uid, models, req.email, subject_client, body_client)
 
     except Exception as e:
         logging.error(f"submit_rdv error: {e}")
