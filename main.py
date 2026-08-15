@@ -1,18 +1,46 @@
 import os
-import xmlrpc.client
 import logging
 import secrets
 import re
 import base64
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Form, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 
+from odoo_client import odoo_connect, get_mission_info, ODOO_DB, ODOO_USER, ODOO_PASSWORD, EXPERT_NAME
+from mcp_server import mcp
+
 logging.basicConfig(level=logging.INFO)
 
-app = FastAPI()
+MCP_API_KEY = os.getenv("MCP_API_KEY", "")
+mcp_app = mcp.streamable_http_app()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with mcp.session_manager.run():
+        yield
+
+
+class MCPAuthMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["path"].startswith("/mcp"):
+            headers = dict(scope["headers"])
+            auth = headers.get(b"authorization", b"").decode()
+            if not MCP_API_KEY or auth != f"Bearer {MCP_API_KEY}":
+                response = JSONResponse({"error": "unauthorized"}, status_code=401)
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -21,53 +49,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(MCPAuthMiddleware)
+app.mount("/mcp", mcp_app)
 
-ODOO_URL      = os.getenv("ODOO_URL", "https://peb-pulls.odoo.com")
-ODOO_DB       = os.getenv("ODOO_DB", "peb-pulls")
-ODOO_USER     = os.getenv("ODOO_USER", "armine.sotodeh10@gmail.com")
-ODOO_PASSWORD = os.getenv("ODOO_PASSWORD", "")
-EXPERT_NAME   = "Armine Sotodeh"
-RAILWAY_URL   = os.getenv("RAILWAY_URL", "https://web-production-5789.up.railway.app")
-
-
-def odoo_connect():
-    logging.info(f"Connexion Odoo: {ODOO_URL} / {ODOO_DB} / {ODOO_USER}")
-    common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common")
-    uid = common.authenticate(ODOO_DB, ODOO_USER, ODOO_PASSWORD, {})
-    logging.info(f"UID obtenu: {uid}")
-    if not uid:
-        raise Exception("Authentification Odoo echouee")
-    models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
-    return uid, models
-
-
-def get_mission_info(uid, models, event_id):
-    events = models.execute_kw(
-        ODOO_DB, uid, ODOO_PASSWORD,
-        "calendar.event", "read",
-        [[event_id]],
-        {"fields": ["name", "x_studio_informations_sur_le_bien", "x_studio_adresse_du_bien"]}
-    )
-    if not events:
-        return {}
-    ev = events[0]
-    infos = ev.get("x_studio_informations_sur_le_bien", "") or ""
-    client_nom, client_email, client_tel = "", "", ""
-    mand = infos.split("MANDATAIRE")
-    if len(mand) > 1:
-        nm = re.search(r"Nom\s*:\s*(.+)", mand[1])
-        if nm: client_nom = nm.group(1).strip()
-        em = re.search(r"Email\s*:\s*(.+)", mand[1])
-        if em: client_email = em.group(1).strip()
-        pm = re.search(r"T.l\s*:\s*(.+)", mand[1])
-        if pm: client_tel = pm.group(1).strip()
-    return {
-        "nom":     client_nom,
-        "email":   client_email,
-        "tel":     client_tel,
-        "adresse": ev.get("x_studio_adresse_du_bien", ""),
-        "name":    ev.get("name", "")
-    }
+RAILWAY_URL = os.getenv("RAILWAY_URL", "https://web-production-5789.up.railway.app")
 
 
 def send_odoo_mail(uid, models, email_to, subject, body_html):
