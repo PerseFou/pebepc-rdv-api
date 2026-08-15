@@ -77,43 +77,59 @@ def list_website_pages(limit: int = 100) -> list[dict]:
 @mcp.tool()
 def get_page_html(page_id: int) -> dict:
     """Retourne le HTML/QWeb brut (arch_db) d'une page du site, a partir de son website.page id.
+    Cherche d'abord la vue COW (website-specific) creee par l'editeur visuel Odoo, puis la vue de base.
     Utile pour lire le contenu actuel avant de le modifier avec update_page_html."""
     uid, models = odoo_connect()
     pages = models.execute_kw(
         ODOO_DB, uid, ODOO_PASSWORD, "website.page", "read",
         [[page_id]],
-        {"fields": ["id", "name", "url", "is_published", "view_id"]}
+        {"fields": ["id", "name", "url", "is_published", "view_id", "website_id"]}
     )
     if not pages:
         return {"error": "page introuvable"}
     page = pages[0]
-    view_id = page["view_id"][0] if page.get("view_id") else None
-    if not view_id:
+    base_view_id = page["view_id"][0] if page.get("view_id") else None
+    if not base_view_id:
         return {"error": "pas de vue associee a cette page"}
-    views = models.execute_kw(
-        ODOO_DB, uid, ODOO_PASSWORD, "ir.ui.view", "read",
-        [[view_id]],
-        {"fields": ["id", "name", "arch_db", "key"]}
+
+    # Cherche la vue COW (enfant website-specific creee par l'editeur visuel)
+    cow_views = models.execute_kw(
+        ODOO_DB, uid, ODOO_PASSWORD, "ir.ui.view", "search_read",
+        [[["inherit_id", "=", base_view_id], ["website_id", "!=", False]]],
+        {"fields": ["id", "name", "arch_db", "key", "website_id"], "limit": 1}
     )
-    view = views[0] if views else {}
+    if cow_views:
+        view = cow_views[0]
+        view_id = view["id"]
+        cow = True
+    else:
+        views = models.execute_kw(
+            ODOO_DB, uid, ODOO_PASSWORD, "ir.ui.view", "read",
+            [[base_view_id]],
+            {"fields": ["id", "name", "arch_db", "key"]}
+        )
+        view = views[0] if views else {}
+        view_id = base_view_id
+        cow = False
+
     return {
         "page_id": page["id"],
         "name": page["name"],
         "url": page["url"],
         "is_published": page["is_published"],
         "view_id": view_id,
+        "base_view_id": base_view_id,
         "view_key": view.get("key"),
+        "cow_view": cow,
         "html": view.get("arch_db")
     }
 
 
 @mcp.tool()
 def update_page_html(page_id: int, html: str) -> dict:
-    """Remplace le contenu HTML/QWeb (arch_db) d'une page existante du site, identifiee par son
-    website.page id. ATTENTION : le HTML doit rester une structure QWeb valide (meme squelette
-    que ce que retourne get_page_html), sinon la page cassera en production des l'enregistrement.
-    Toujours appeler get_page_html d'abord pour recuperer et adapter le contenu existant plutot
-    que d'ecrire une structure QWeb inedite."""
+    """Remplace le contenu HTML/QWeb (arch_db) d'une page existante du site.
+    Ecrit dans la vue COW (creee par l'editeur visuel) si elle existe, sinon dans la vue de base.
+    Toujours appeler get_page_html d'abord pour recuperer le contenu existant."""
     uid, models = odoo_connect()
     pages = models.execute_kw(
         ODOO_DB, uid, ODOO_PASSWORD, "website.page", "read",
@@ -122,12 +138,21 @@ def update_page_html(page_id: int, html: str) -> dict:
     )
     if not pages or not pages[0].get("view_id"):
         return {"success": False, "error": "page ou vue introuvable"}
-    view_id = pages[0]["view_id"][0]
+    base_view_id = pages[0]["view_id"][0]
+
+    # Prefere la vue COW si elle existe
+    cow_views = models.execute_kw(
+        ODOO_DB, uid, ODOO_PASSWORD, "ir.ui.view", "search_read",
+        [[["inherit_id", "=", base_view_id], ["website_id", "!=", False]]],
+        {"fields": ["id"], "limit": 1}
+    )
+    view_id = cow_views[0]["id"] if cow_views else base_view_id
+
     models.execute_kw(
         ODOO_DB, uid, ODOO_PASSWORD, "ir.ui.view", "write",
         [[view_id], {"arch_db": html}]
     )
-    return {"success": True, "page_id": page_id, "view_id": view_id}
+    return {"success": True, "page_id": page_id, "view_id": view_id, "cow_view": bool(cow_views)}
 
 
 @mcp.tool()
