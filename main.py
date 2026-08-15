@@ -50,7 +50,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(MCPAuthMiddleware)
-app.mount("/mcp", mcp_app)
 
 RAILWAY_URL = os.getenv("RAILWAY_URL", "https://web-production-5789.up.railway.app")
 
@@ -526,3 +525,8 @@ def refuse_mission(token: str, req: RefuseRequest):
     except Exception as e:
         logging.error(f"refuse_mission error: {e}")
         return {"success": False, "error": str(e)}
+
+
+# ── MCP (monté en dernier pour ne pas intercepter les routes ci-dessus) ──
+
+app.mount("/", mcp_app)

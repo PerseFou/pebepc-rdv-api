@@ -1,7 +1,7 @@
 from mcp.server.fastmcp import FastMCP
 from odoo_client import odoo_connect, get_mission_info, ODOO_DB, ODOO_PASSWORD
 
-mcp = FastMCP("pebepc-odoo", streamable_http_path="/")
+mcp = FastMCP("pebepc-odoo")
 
 
 @mcp.tool()
