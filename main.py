@@ -595,6 +595,76 @@ def post_chat(token: str, req: ChatRequest):
         return {"success": False, "error": str(e)}
 
 
+# ── DASHBOARD CLIENT ───────────────────────────────────────
+
+@app.get("/pebepc/client/missions")
+def get_client_missions(email: str):
+    try:
+        if not email or "@" not in email:
+            return {"success": False, "error": "Email invalide"}
+        uid, models = odoo_connect()
+
+        # Find partner by email
+        partners = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.partner", "search_read",
+            [[["email", "=ilike", email.strip()]]],
+            {"fields": ["id", "name"], "limit": 5})
+        if not partners:
+            return {"success": True, "client_name": "", "missions": []}
+
+        partner_ids = [p["id"] for p in partners]
+        client_name = partners[0]["name"]
+
+        # Find all events where this partner is attendee
+        events = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "search_read",
+            [[["partner_ids", "in", partner_ids], ["active", "=", True]]],
+            {"fields": ["id", "name", "start", "x_studio_adresse_du_bien",
+                        "x_studio_informations_sur_le_bien", "x_studio_statut_draft",
+                        "x_studio_client_token", "x_studio_pdf_provisoire",
+                        "x_studio_pdf_definitif"],
+             "order": "start desc", "limit": 50})
+
+        missions = []
+        for ev in (events or []):
+            infos     = ev.get("x_studio_informations_sur_le_bien", "") or ""
+            type_bien = superficie = ""
+            tm = re.search(r"Type\s*:\s*(.+)", infos)
+            if tm: type_bien = tm.group(1).strip()
+            sm = re.search(r"Superficie\s*:\s*(.+)", infos)
+            if sm: superficie = sm.group(1).strip()
+
+            statut_raw = str(ev.get("x_studio_statut_draft") or "false")
+            statut_map = {
+                "false":          {"label": "En attente",        "color": "#3B82F6"},
+                "none":           {"label": "En attente",        "color": "#3B82F6"},
+                "draft_sent":     {"label": "PEB provisoire",    "color": "#F59E0B"},
+                "draft_refused":  {"label": "PEB refusé",        "color": "#EF4444"},
+                "draft_accepted": {"label": "PEB accepté",       "color": "#10B981"},
+                "closed":         {"label": "Dossier clôturé",   "color": "#6B7280"},
+            }
+            statut_info = statut_map.get(statut_raw, {"label": statut_raw, "color": "#6B7280"})
+
+            token = ev.get("x_studio_client_token") or ""
+            missions.append({
+                "id":         ev["id"],
+                "name":       ev["name"],
+                "start":      ev.get("start", ""),
+                "adresse":    ev.get("x_studio_adresse_du_bien", "") or "",
+                "type_bien":  type_bien,
+                "superficie": superficie,
+                "statut":     statut_raw,
+                "statut_label": statut_info["label"],
+                "statut_color": statut_info["color"],
+                "token":      token,
+                "has_pdf":    bool(ev.get("x_studio_pdf_provisoire")),
+                "has_pdf_final": bool(ev.get("x_studio_pdf_definitif")),
+            })
+
+        return {"success": True, "client_name": client_name, "missions": missions}
+    except Exception as e:
+        logging.error(f"get_client_missions error: {e}")
+        return {"success": False, "error": str(e)}
+
+
 # ── MCP (monté en dernier pour ne pas intercepter les routes ci-dessus) ──
 
 app.mount("/", mcp_app)
