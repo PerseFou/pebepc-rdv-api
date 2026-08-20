@@ -999,6 +999,109 @@ def download_document(token: str, attachment_id: int):
         return Response(content=str(e).encode(), status_code=500)
 
 
+# ── VUE EXPERT ─────────────────────────────────────────────
+
+@app.get("/pebepc/expert/mission/{token}")
+def get_expert_mission(token: str):
+    """Full mission details for the expert view (not exposed to clients)."""
+    try:
+        uid, models = odoo_connect()
+        events = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "search_read",
+            [[["x_studio_client_token", "=", token], ["active", "=", True]]],
+            {"fields": ["id", "name", "start", "stop",
+                        "x_studio_adresse_du_bien", "x_studio_informations_sur_le_bien",
+                        "x_studio_statut_draft", "x_studio_remarques_client",
+                        "x_studio_pdf_provisoire", "x_studio_pdf_definitif",
+                        "partner_ids"], "limit": 1})
+        if not events:
+            return {"success": False, "error": "Mission introuvable"}
+        ev    = events[0]
+        infos = ev.get("x_studio_informations_sur_le_bien", "") or ""
+        name  = ev.get("name", "") or ""
+
+        # Parse fields from x_infos
+        def _field(label, text):
+            m = re.search(rf"{label}\s*:\s*(.+)", text)
+            return m.group(1).strip() if m else ""
+
+        type_bien  = _field("Type", infos)
+        superficie = _field("Superficie", infos)
+
+        mand_section = infos.split("MANDATAIRE")[1] if "MANDATAIRE" in infos else ""
+        client_nom   = _field("Nom", mand_section)
+        client_tel   = _field("Tel", mand_section)
+        client_email = _field("Email", mand_section)
+
+        # Contact place (agence / propriétaire)
+        gestion = "Agence" if infos.startswith("AGENCE") else "Propriétaire"
+        bien_section   = infos.split("\nBIEN")[0] if "\nBIEN" in infos else ""
+        place_nom  = _field("Nom", bien_section)
+        place_tel  = _field("Tel", bien_section)
+        place_email = _field("Email", bien_section)
+
+        is_express = "EXPRESS" in name or "EXPRESS" in infos
+        if "[PEB + Él" in name or "PEB + Certificat" in infos:
+            type_service = "pack"
+        elif "Certificat Electrique" in infos and "PEB + Certificat" not in infos:
+            type_service = "electrique"
+        else:
+            type_service = "peb"
+
+        statut_map = {
+            "false": "En attente", "none": "En attente",
+            "draft_sent": "PEB provisoire", "draft_refused": "PEB refusé",
+            "draft_accepted": "PEB accepté", "closed": "Dossier clôturé",
+        }
+        statut_raw = str(ev.get("x_studio_statut_draft") or "false")
+
+        # Retrieve attachments for this event
+        attachments = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "ir.attachment", "search_read",
+            [[["res_model", "=", "calendar.event"], ["res_id", "=", ev["id"]]]],
+            {"fields": ["id", "name", "mimetype", "file_size", "create_date", "create_uid"],
+             "order": "create_date desc", "limit": 50})
+
+        docs = [{
+            "id": a["id"],
+            "name": a["name"],
+            "mimetype": a.get("mimetype", ""),
+            "size": a.get("file_size", 0),
+            "date": a.get("create_date", ""),
+            "author": a["create_uid"][1] if isinstance(a.get("create_uid"), (list, tuple)) else "",
+        } for a in (attachments or [])]
+
+        return {
+            "success": True,
+            "mission": {
+                "id":           ev["id"],
+                "name":         name,
+                "start":        ev.get("start", ""),
+                "stop":         ev.get("stop", ""),
+                "adresse":      ev.get("x_studio_adresse_du_bien", "") or "",
+                "type_bien":    type_bien,
+                "superficie":   superficie,
+                "gestion":      gestion,
+                "client_nom":   client_nom,
+                "client_tel":   client_tel,
+                "client_email": client_email,
+                "place_nom":    place_nom,
+                "place_tel":    place_tel,
+                "place_email":  place_email,
+                "statut":       statut_raw,
+                "statut_label": statut_map.get(statut_raw, statut_raw),
+                "remarques":    ev.get("x_studio_remarques_client", "") or "",
+                "has_pdf":      bool(ev.get("x_studio_pdf_provisoire")),
+                "has_pdf_final": bool(ev.get("x_studio_pdf_definitif")),
+                "express":      is_express,
+                "type_service": type_service,
+                "infos_raw":    infos,
+            },
+            "documents": docs,
+        }
+    except Exception as e:
+        logging.error(f"get_expert_mission error: {e}")
+        return {"success": False, "error": str(e)}
+
+
 # ── MCP (monté en dernier pour ne pas intercepter les routes ci-dessus) ──
 
 app.mount("/", mcp_app)
