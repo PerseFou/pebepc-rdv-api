@@ -112,6 +112,10 @@ class RefuseRequest(BaseModel):
     remarques: Optional[str] = ""
 
 
+class ChatRequest(BaseModel):
+    message: str
+
+
 # ── ENDPOINTS RDV ──────────────────────────────────────────
 
 @app.get("/")
@@ -524,6 +528,70 @@ def refuse_mission(token: str, req: RefuseRequest):
         return {"success": True}
     except Exception as e:
         logging.error(f"refuse_mission error: {e}")
+        return {"success": False, "error": str(e)}
+
+
+# ── CHAT CLIENT ────────────────────────────────────────────
+
+CHARLOTTE_PARTNER_ID = 12  # res.partner id de charlotte@pebepc.com
+
+
+@app.get("/pebepc/chat/{token}")
+def get_chat(token: str):
+    try:
+        uid, models = odoo_connect()
+        events = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "search_read",
+            [[["x_studio_client_token", "=", token], ["active", "=", True]]],
+            {"fields": ["id"], "limit": 1})
+        if not events:
+            return {"success": False, "error": "Mission introuvable"}
+        event_id = events[0]["id"]
+
+        msgs = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "mail.message", "search_read",
+            [[["model", "=", "calendar.event"], ["res_id", "=", event_id],
+              ["message_type", "in", ["comment", "email"]]]],
+            {"fields": ["id", "author_id", "body", "date"], "order": "date asc", "limit": 100})
+
+        result = []
+        for msg in (msgs or []):
+            aid = msg.get("author_id")
+            result.append({
+                "id":        msg["id"],
+                "author":    aid[1] if aid else "Inconnu",
+                "is_expert": bool(aid and aid[0] == CHARLOTTE_PARTNER_ID),
+                "body":      msg.get("body", ""),
+                "date":      msg.get("date", "")
+            })
+        return {"success": True, "messages": result}
+    except Exception as e:
+        logging.error(f"get_chat error: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/pebepc/chat/{token}")
+def post_chat(token: str, req: ChatRequest):
+    try:
+        uid, models = odoo_connect()
+        events = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "search_read",
+            [[["x_studio_client_token", "=", token], ["active", "=", True]]],
+            {"fields": ["id", "partner_ids"], "limit": 1})
+        if not events:
+            return {"success": False, "error": "Mission introuvable"}
+        event_id    = events[0]["id"]
+        partner_ids = events[0].get("partner_ids", [])
+
+        # Partenaire client = premier partenaire qui n'est pas Charlotte
+        client_partner_id = next((p for p in partner_ids if p != CHARLOTTE_PARTNER_ID), None)
+
+        kwargs = {"body": req.message, "message_type": "comment", "subtype_xmlid": "mail.mt_comment"}
+        if client_partner_id:
+            kwargs["author_id"] = client_partner_id
+
+        models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "message_post",
+            [[event_id]], kwargs)
+        return {"success": True}
+    except Exception as e:
+        logging.error(f"post_chat error: {e}")
         return {"success": False, "error": str(e)}
 
 
