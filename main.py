@@ -106,6 +106,10 @@ class SubmitRequest(BaseModel):
     fact_addr: Optional[str] = ""
     fact_email: Optional[str] = ""
     fact_tva: Optional[str] = ""
+    # type_service: "peb" (défaut), "electrique" (pas de calendar.event), "pack" (PEB+Élec)
+    type_service: Optional[str] = "peb"
+    # express: True = livraison urgente, badge ⚡ dans le dashboard
+    express: Optional[bool] = False
 
 
 class RefuseRequest(BaseModel):
@@ -143,7 +147,11 @@ def taken_slots(req: TakenSlotsRequest):
 @app.post("/pebepc/rdv/submit")
 def submit_rdv(req: SubmitRequest):
     try:
-        logging.info(f"submit_rdv recu: {req.prenom} {req.nom} / {req.email}")
+        svc = (req.type_service or "peb").lower()
+        is_elec_only = svc == "electrique"
+        is_pack = svc == "pack"
+        is_express = bool(req.express)
+        logging.info(f"submit_rdv: {req.prenom} {req.nom} / svc={svc} express={is_express}")
         uid, models = odoo_connect()
 
         def find_or_create_partner(email, name, phone=""):
@@ -161,12 +169,7 @@ def submit_rdv(req: SubmitRequest):
             return models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.partner", "create",
                 [{"name": name, "email": email.strip().lower(), "phone": phone}])
 
-        expert_id = find_or_create_partner(ODOO_USER, EXPERT_NAME)
         client_id = find_or_create_partner(req.email, f"{req.prenom} {req.nom}", req.tel)
-        place_id = None
-        if req.contact_place_email:
-            place_id = find_or_create_partner(req.contact_place_email, req.contact_place_nom or req.contact_place_email, req.contact_place_tel)
-
         adresse = req.rue + (f", {req.boite}" if req.boite else "") + f", {req.cp} {req.ville}"
 
         gestion = req.gestion_type or ""
@@ -176,13 +179,95 @@ def submit_rdv(req: SubmitRequest):
         if req.contact_place_email: x_infos += f"Email : {req.contact_place_email}\n"
         x_infos += f"\nBIEN\nType : {req.type_bien}\nSuperficie : {req.superficie}"
         x_infos += f"\n\nMANDATAIRE\nNom : {req.prenom} {req.nom}\nTel : {req.tel}\nEmail : {req.email}"
+        if is_express:
+            x_infos += "\n\nEXPRESS : Oui"
+        if is_pack:
+            x_infos += "\n\nSERVICE : PEB + Certificat Electrique"
+        elif is_elec_only:
+            x_infos += "\n\nSERVICE : Certificat Electrique"
+
+        # ── Facture (tous les services) ──
+        invoice_id = None
+        if req.prix and req.prix > 0:
+            try:
+                htva = round(req.prix / 1.21, 2)
+                taxes = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "account.tax", "search_read",
+                    [[["amount", "=", 21], ["type_tax_use", "=", "sale"], ["active", "=", True]]], {"fields": ["id"], "limit": 1})
+                tax_ids = [[4, taxes[0]["id"]]] if taxes else []
+                if is_elec_only:
+                    inv_label = f"Certificat Electrique — {req.type_bien} {req.superficie} — {adresse}"
+                elif is_pack:
+                    inv_label = f"Pack PEB + Certificat Electrique — {req.type_bien} {req.superficie} — {adresse}"
+                else:
+                    express_tag = "EXPRESS " if is_express else ""
+                    inv_label = f"Certification PEB {express_tag}— {req.type_bien} {req.superficie} — {adresse}"
+                invoice_id = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "account.move", "create", [{
+                    "move_type": "out_invoice", "partner_id": client_id,
+                    "invoice_line_ids": [[0, 0, {"name": inv_label, "quantity": 1, "price_unit": htva, "tax_ids": tax_ids}]]
+                }])
+            except Exception as e:
+                logging.warning(f"Creation facture: {e}")
+
+        # ── CERTIFICAT ELECTRIQUE SEUL : pas de calendar.event ──
+        if is_elec_only:
+            express_tag = " ⚡ EXPRESS" if is_express else ""
+            subject_expert = f"Nouvelle demande Certificat Electrique{express_tag} - {req.prenom} {req.nom}"
+            body_expert = f"""<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+    <div style="background:linear-gradient(135deg,#F59E0B,#FBBF24);padding:24px 28px;border-radius:12px 12px 0 0;">
+        <h1 style="color:#fff;font-size:1.2rem;margin:0;">Nouvelle demande : Certificat Electrique{express_tag}</h1>
+    </div>
+    <div style="background:#fff;padding:24px 28px;border:1px solid #e5e7eb;border-radius:0 0 12px 12px;">
+        <p style="color:#374151;"><strong>{req.prenom} {req.nom}</strong> a soumis une demande.</p>
+        <table style="width:100%;border-collapse:collapse;margin:16px 0;">
+            <tr><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Nom</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.prenom} {req.nom}</td></tr>
+            <tr style="background:#f4f6fb;"><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Email</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.email}</td></tr>
+            <tr><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Tel</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.tel}</td></tr>
+            <tr style="background:#f4f6fb;"><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Adresse</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{adresse}</td></tr>
+            <tr><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Type de bien</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.type_bien} - {req.superficie}</td></tr>
+            <tr style="background:#f4f6fb;"><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Creneau souhaite</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.creneau_label}</td></tr>
+            <tr><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Prix TTC</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.prix} €</td></tr>
+            {f'<tr style="background:#fff8e7;"><td style="padding:8px;color:#92610a;font-size:0.82rem;font-weight:800;text-transform:uppercase;">Facturation</td><td style="padding:8px;color:#92610a;font-weight:700;">{req.fact_nom or req.prenom+" "+req.nom} — TVA: {req.fact_tva or "/"}</td></tr>' if req.fact_tva else ''}
+        </table>
+        {f'<div style="background:#fff8e7;padding:12px;border-radius:8px;margin-top:8px;"><b style="color:#92610a;">Contact sur place :</b> {req.contact_place_nom} — {req.contact_place_tel} — {req.contact_place_email}</div>' if req.contact_place_email else ''}
+    </div>
+</div>"""
+            send_odoo_mail(uid, models, ODOO_USER, subject_expert, body_expert)
+
+            # Confirmation client
+            send_odoo_mail(uid, models, req.email,
+                "Votre demande de Certificat Electrique a bien été reçue",
+                f"""<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+    <div style="background:linear-gradient(135deg,#F59E0B,#FBBF24);padding:24px 28px;border-radius:12px 12px 0 0;">
+        <h1 style="color:#fff;font-size:1.2rem;margin:0;">Demande reçue !</h1>
+    </div>
+    <div style="background:#fff;padding:24px 28px;border:1px solid #e5e7eb;border-radius:0 0 12px 12px;">
+        <p style="color:#374151;">Bonjour <strong>{req.prenom} {req.nom}</strong>,</p>
+        <p style="color:#374151;">Nous avons bien reçu votre demande de Certificat Electrique pour :</p>
+        <p style="background:#f4f6fb;padding:12px;border-radius:8px;color:#1B3A8C;font-weight:bold;">{adresse}</p>
+        <p style="color:#374151;">Nous vous contacterons prochainement pour confirmer le rendez-vous.</p>
+        <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;"/>
+        <p style="color:#8a9bb5;font-size:0.78rem;">Armine Sotodeh — Expert PEB &amp; Certificat Electrique</p>
+    </div>
+</div>""")
+
+            return {"success": True, "event_id": None, "invoice_id": invoice_id}
+
+        # ── PEB ou PACK : création du calendar.event ──
+        expert_id = find_or_create_partner(ODOO_USER, EXPERT_NAME)
+        place_id = None
+        if req.contact_place_email:
+            place_id = find_or_create_partner(req.contact_place_email, req.contact_place_nom or req.contact_place_email, req.contact_place_tel)
 
         partner_ids = [expert_id]
         if client_id and client_id != expert_id: partner_ids.append(client_id)
         if place_id and place_id not in partner_ids: partner_ids.append(place_id)
 
+        express_prefix = "⚡ EXPRESS — " if is_express else ""
+        pack_suffix = " [PEB + Élec]" if is_pack else ""
+        event_name = f"{express_prefix}PEB{pack_suffix} — {req.type_bien} {req.superficie} — {adresse}"
+
         event_id = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "create", [{
-            "name": f"PEB — {req.type_bien} {req.superficie} — {adresse}",
+            "name": event_name,
             "start": req.start_utc, "stop": req.stop_utc,
             "description": f"Creneau : {req.creneau_label}\nAdresse : {adresse}\n\n{x_infos}",
             "partner_ids": [[6, 0, partner_ids]],
@@ -197,31 +282,23 @@ def submit_rdv(req: SubmitRequest):
         except Exception as e:
             logging.warning(f"Champs studio event: {e}")
 
-        invoice_id = None
-        if req.prix and req.prix > 0:
+        if invoice_id:
             try:
-                htva = round(req.prix / 1.21, 2)
-                taxes = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "account.tax", "search_read",
-                    [[["amount", "=", 21], ["type_tax_use", "=", "sale"], ["active", "=", True]]], {"fields": ["id"], "limit": 1})
-                tax_ids = [[4, taxes[0]["id"]]] if taxes else []
-                invoice_id = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "account.move", "create", [{
-                    "move_type": "out_invoice", "partner_id": client_id,
-                    "invoice_line_ids": [[0, 0, {
-                        "name": f"Certification PEB — {req.type_bien} {req.superficie} — {adresse}",
-                        "quantity": 1, "price_unit": htva, "tax_ids": tax_ids
-                    }]]
-                }])
                 models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "write", [[event_id], {"x_studio_facture_liee": invoice_id}])
             except Exception as e:
-                logging.warning(f"Creation facture: {e}")
+                logging.warning(f"Lien facture event: {e}")
 
         # ── Mail notification Armine ──
-        subject_expert = f"Nouveau RDV PEB - {req.prenom} {req.nom}"
+        express_label = " ⚡ EXPRESS" if is_express else ""
+        pack_label = " [PEB + Élec]" if is_pack else ""
+        subject_expert = f"Nouveau RDV PEB{pack_label}{express_label} - {req.prenom} {req.nom}"
+        header_color = "#DC2626,#EF4444" if is_express else ("135,#1B3A8C,#3B82F6" if not is_pack else "135,#7C3AED,#A78BFA")
         body_expert = f"""<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
-    <div style="background:linear-gradient(135deg,#1B3A8C,#3B82F6);padding:24px 28px;border-radius:12px 12px 0 0;">
-        <h1 style="color:#fff;font-size:1.2rem;margin:0;">Nouveau RDV PEB enregistre</h1>
+    <div style="background:linear-gradient(135deg,{'#DC2626,#EF4444' if is_express else ('#7C3AED,#A78BFA' if is_pack else '#1B3A8C,#3B82F6')});padding:24px 28px;border-radius:12px 12px 0 0;">
+        <h1 style="color:#fff;font-size:1.2rem;margin:0;">{'⚡ URGENT — ' if is_express else ''}Nouveau RDV PEB{pack_label} enregistré</h1>
     </div>
     <div style="background:#fff;padding:24px 28px;border:1px solid #e5e7eb;border-radius:0 0 12px 12px;">
+        {'<div style="background:#fef2f2;border:1.5px solid #fecaca;border-radius:8px;padding:12px;margin-bottom:16px;color:#DC2626;font-weight:800;font-size:0.95rem;">⚡ Livraison EXPRESS demandée — À traiter en priorité !</div>' if is_express else ''}
         <p style="color:#374151;"><strong>{req.prenom} {req.nom}</strong> vient de prendre un RDV.</p>
         <table style="width:100%;border-collapse:collapse;margin:16px 0;">
             <tr><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Type</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.type_bien} - {req.superficie}</td></tr>
@@ -238,18 +315,20 @@ def submit_rdv(req: SubmitRequest):
         send_odoo_mail(uid, models, ODOO_USER, subject_expert, body_expert)
 
         # ── Mail confirmation client ──
-        subject_client = "Confirmation de votre demande de RDV PEB"
+        service_label = "Pack PEB + Certificat Electrique" if is_pack else "certification PEB"
+        subject_client = f"Confirmation de votre demande de RDV — {service_label}"
         body_client = f"""<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
-    <div style="background:linear-gradient(135deg,#1B3A8C,#3B82F6);padding:24px 28px;border-radius:12px 12px 0 0;">
-        <h1 style="color:#fff;font-size:1.2rem;margin:0;">Votre demande de RDV a bien ete enregistree</h1>
+    <div style="background:linear-gradient(135deg,{'#DC2626,#EF4444' if is_express else '#1B3A8C,#3B82F6'});padding:24px 28px;border-radius:12px 12px 0 0;">
+        <h1 style="color:#fff;font-size:1.2rem;margin:0;">{'⚡ ' if is_express else ''}Votre demande de RDV a bien été enregistrée</h1>
     </div>
     <div style="background:#fff;padding:24px 28px;border:1px solid #e5e7eb;border-radius:0 0 12px 12px;">
         <p style="color:#374151;">Bonjour <strong>{req.prenom} {req.nom}</strong>,</p>
-        <p style="color:#374151;">Nous avons bien recu votre demande de RDV pour la certification PEB du bien situe au :</p>
+        <p style="color:#374151;">Nous avons bien reçu votre demande de RDV pour la {service_label} du bien situé au :</p>
         <p style="background:#f4f6fb;padding:12px;border-radius:8px;color:#1B3A8C;font-weight:bold;">{adresse}</p>
+        {'<p style="background:#fef2f2;padding:10px;border-radius:8px;color:#DC2626;font-weight:700;">⚡ Votre demande express sera traitée en priorité.</p>' if is_express else ''}
         <table style="width:100%;border-collapse:collapse;margin:16px 0;">
             <tr><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Type de bien</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.type_bien} - {req.superficie}</td></tr>
-            <tr style="background:#f4f6fb;"><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Creneau souhaite</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.creneau_label}</td></tr>
+            <tr style="background:#f4f6fb;"><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Créneau souhaité</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.creneau_label}</td></tr>
         </table>
         <p style="color:#374151;">Notre expert vous contactera prochainement pour confirmer le rendez-vous.</p>
         <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;"/>
@@ -713,6 +792,7 @@ def _fetch_missions(uid, models, partner_ids):
     missions = []
     for ev in (events or []):
         infos = ev.get("x_studio_informations_sur_le_bien", "") or ""
+        name = ev.get("name", "") or ""
         type_bien = superficie = ""
         tm = re.search(r"Type\s*:\s*(.+)", infos)
         if tm: type_bien = tm.group(1).strip()
@@ -720,8 +800,15 @@ def _fetch_missions(uid, models, partner_ids):
         if sm: superficie = sm.group(1).strip()
         statut_raw = str(ev.get("x_studio_statut_draft") or "false")
         si = statut_map.get(statut_raw, {"label": statut_raw, "color": "#6B7280"})
+        is_express = "EXPRESS" in name or "EXPRESS : Oui" in infos or "EXPRESS" in infos
+        if "PEB + Certificat" in infos or "[PEB + Él" in name or "[PEB + El" in name:
+            type_service = "pack"
+        elif "Certificat Electrique" in infos and "PEB" not in infos.split("SERVICE")[-1]:
+            type_service = "electrique"
+        else:
+            type_service = "peb"
         missions.append({
-            "id": ev["id"], "name": ev["name"],
+            "id": ev["id"], "name": name,
             "start": ev.get("start", ""),
             "adresse": ev.get("x_studio_adresse_du_bien", "") or "",
             "type_bien": type_bien, "superficie": superficie,
@@ -729,6 +816,8 @@ def _fetch_missions(uid, models, partner_ids):
             "token": ev.get("x_studio_client_token") or "",
             "has_pdf": bool(ev.get("x_studio_pdf_provisoire")),
             "has_pdf_final": bool(ev.get("x_studio_pdf_definitif")),
+            "express": is_express,
+            "type_service": type_service,
         })
     return missions
 
