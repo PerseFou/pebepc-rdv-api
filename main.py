@@ -147,9 +147,19 @@ def submit_rdv(req: SubmitRequest):
         uid, models = odoo_connect()
 
         def find_or_create_partner(email, name, phone=""):
-            existing = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.partner", "search_read", [[["email", "=", email]]], {"fields": ["id"], "limit": 1})
-            if existing: return existing[0]["id"]
-            return models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.partner", "create", [{"name": name, "email": email, "phone": phone}])
+            existing = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.partner", "search_read",
+                [[["email", "=ilike", email.strip()]]],
+                {"fields": ["id", "name", "phone"], "order": "id asc", "limit": 1})
+            if existing:
+                pid = existing[0]["id"]
+                updates = {}
+                if name and not existing[0].get("name"): updates["name"] = name
+                if phone and not existing[0].get("phone"): updates["phone"] = phone
+                if updates:
+                    models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.partner", "write", [[pid], updates])
+                return pid
+            return models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.partner", "create",
+                [{"name": name, "email": email.strip().lower(), "phone": phone}])
 
         expert_id = find_or_create_partner(ODOO_USER, EXPERT_NAME)
         client_id = find_or_create_partner(req.email, f"{req.prenom} {req.nom}", req.tel)
