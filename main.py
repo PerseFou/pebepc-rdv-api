@@ -803,6 +803,113 @@ def get_client_missions(email: str):
         return {"success": False, "error": str(e)}
 
 
+# ── DOCUMENTS MISSION ─────────────────────────────────────
+
+ALLOWED_MIME = {
+    "application/pdf": "pdf",
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/png": "png",
+    "image/heic": "heic",
+    "image/heif": "heif",
+    "image/webp": "webp",
+}
+MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 Mo
+
+
+def _get_event_id_by_token(uid, models, token):
+    events = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "search_read",
+        [[["x_studio_client_token", "=", token], ["active", "=", True]]],
+        {"fields": ["id"], "limit": 1})
+    return events[0]["id"] if events else None
+
+
+@app.get("/pebepc/mission/{token}/documents")
+def list_documents(token: str):
+    try:
+        uid, models = odoo_connect()
+        event_id = _get_event_id_by_token(uid, models, token)
+        if not event_id:
+            return {"success": False, "error": "Mission introuvable"}
+        atts = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "ir.attachment", "search_read",
+            [[["res_model", "=", "calendar.event"], ["res_id", "=", event_id]]],
+            {"fields": ["id", "name", "mimetype", "file_size", "create_date", "create_uid"],
+             "order": "create_date desc", "limit": 100})
+        docs = []
+        for a in atts:
+            cu = a.get("create_uid")
+            author = cu[1] if (cu and isinstance(cu, list)) else ""
+            docs.append({
+                "id": a["id"],
+                "name": a["name"] or "",
+                "mimetype": a.get("mimetype", ""),
+                "size": a.get("file_size", 0),
+                "date": a.get("create_date", ""),
+                "author": author,
+            })
+        return {"success": True, "documents": docs}
+    except Exception as e:
+        logging.error(f"list_documents error: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/pebepc/mission/{token}/documents")
+async def upload_document(token: str, file: UploadFile = File(...), author: str = Form(default="")):
+    try:
+        mime = (file.content_type or "").split(";")[0].strip()
+        if mime not in ALLOWED_MIME:
+            return {"success": False, "error": f"Type non autorisé ({mime}). Utilisez PDF, JPG, PNG ou HEIC."}
+        data = await file.read()
+        if not data:
+            return {"success": False, "error": "Fichier vide."}
+        if len(data) > MAX_FILE_SIZE:
+            return {"success": False, "error": "Fichier trop grand (max 20 Mo)."}
+        uid, models = odoo_connect()
+        event_id = _get_event_id_by_token(uid, models, token)
+        if not event_id:
+            return {"success": False, "error": "Mission introuvable"}
+        att_id = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "ir.attachment", "create", [{
+            "name": file.filename or f"document.{ALLOWED_MIME.get(mime, 'bin')}",
+            "res_model": "calendar.event",
+            "res_id": event_id,
+            "datas": base64.b64encode(data).decode(),
+            "mimetype": mime,
+            "description": f"Chargé par {author}" if author else "Chargé via portail client",
+        }])
+        return {"success": True, "id": att_id, "name": file.filename}
+    except Exception as e:
+        logging.error(f"upload_document error: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/pebepc/mission/{token}/documents/{attachment_id}")
+def download_document(token: str, attachment_id: int):
+    try:
+        uid, models = odoo_connect()
+        event_id = _get_event_id_by_token(uid, models, token)
+        if not event_id:
+            return Response(content=b"Mission introuvable", status_code=404)
+        atts = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "ir.attachment", "search_read",
+            [[["id", "=", attachment_id], ["res_model", "=", "calendar.event"], ["res_id", "=", event_id]]],
+            {"fields": ["id", "name", "mimetype", "datas"]})
+        if not atts:
+            return Response(content=b"Document introuvable", status_code=404)
+        a = atts[0]
+        raw = a.get("datas")
+        if not raw:
+            return Response(content=b"Document vide", status_code=404)
+        fname = a.get("name") or "document"
+        return Response(
+            content=base64.b64decode(raw),
+            media_type=a.get("mimetype", "application/octet-stream"),
+            headers={"Content-Disposition": f'attachment; filename="{fname}"',
+                     "Access-Control-Allow-Origin": "*"},
+        )
+    except Exception as e:
+        logging.error(f"download_document error: {e}")
+        return Response(content=str(e).encode(), status_code=500)
+
+
 # ── MCP (monté en dernier pour ne pas intercepter les routes ci-dessus) ──
 
 app.mount("/", mcp_app)
