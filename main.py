@@ -221,7 +221,7 @@ def submit_rdv(req: SubmitRequest):
             <tr><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Email</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.email}</td></tr>
         </table>
         <div style="text-align:center;margin:20px 0;">
-            <a href="https://peb-pulls.odoo.com/peb-dashboard" style="background:#1B3A8C;color:#fff;padding:12px 28px;border-radius:999px;text-decoration:none;font-weight:bold;">Voir le dashboard</a>
+            <a href="https://www.pebepc.com/peb-dashboard" style="background:#1B3A8C;color:#fff;padding:12px 28px;border-radius:999px;text-decoration:none;font-weight:bold;">Voir le dashboard</a>
         </div>
     </div>
 </div>"""
@@ -282,7 +282,7 @@ async def send_draft(
         client_email = infos.get("email", "")
         client_nom   = infos.get("nom", "le mandataire")
         adresse      = infos.get("adresse", "")
-        client_link  = f"https://peb-pulls.odoo.com/rdv-client?token={token}"
+        client_link  = f"https://www.pebepc.com/peb-pulse-token?token={token}"
 
         if client_email:
             subject   = "Votre PEB provisoire est disponible"
@@ -335,7 +335,7 @@ async def send_final(
 
         token_ev = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "read", [[event_id]], {"fields": ["x_studio_client_token"]})
         token    = token_ev[0].get("x_studio_client_token", "") if token_ev else ""
-        pdf_link = f"https://peb-pulls.odoo.com/rdv-client?token={token}" if token else ""
+        pdf_link = f"https://www.pebepc.com/peb-pulse-token?token={token}" if token else ""
 
         if client_email:
             subject   = "Votre certificat PEB definitif est disponible"
@@ -475,7 +475,7 @@ def accept_mission(token: str):
         <p style="background:#f0fdf4;padding:12px;border-radius:8px;color:#16a34a;font-weight:bold;">{adresse}</p>
         <p style="color:#374151;">Vous pouvez maintenant envoyer le PEB definitif depuis le dashboard.</p>
         <div style="text-align:center;margin:20px 0;">
-            <a href="https://peb-pulls.odoo.com/peb-dashboard" style="background:#1B3A8C;color:#fff;padding:12px 28px;border-radius:999px;text-decoration:none;font-weight:bold;">Voir le dashboard</a>
+            <a href="https://www.pebepc.com/peb-dashboard" style="background:#1B3A8C;color:#fff;padding:12px 28px;border-radius:999px;text-decoration:none;font-weight:bold;">Voir le dashboard</a>
         </div>
     </div>
 </div>"""
@@ -519,7 +519,7 @@ def refuse_mission(token: str, req: RefuseRequest):
         <p style="background:#fff8e7;padding:12px;border-radius:8px;color:#92610a;border:1px solid #f9ca66;">{remarques}</p>
         <p style="color:#374151;">Apportez les corrections et renvoyez un nouveau PEB provisoire.</p>
         <div style="text-align:center;margin:20px 0;">
-            <a href="https://peb-pulls.odoo.com/peb-dashboard" style="background:#1B3A8C;color:#fff;padding:12px 28px;border-radius:999px;text-decoration:none;font-weight:bold;">Voir le dashboard</a>
+            <a href="https://www.pebepc.com/peb-dashboard" style="background:#1B3A8C;color:#fff;padding:12px 28px;border-radius:999px;text-decoration:none;font-weight:bold;">Voir le dashboard</a>
         </div>
     </div>
 </div>"""
