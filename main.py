@@ -605,6 +605,134 @@ def post_chat(token: str, req: ChatRequest):
         return {"success": False, "error": str(e)}
 
 
+# ── AUTH CLIENT ────────────────────────────────────────────
+
+import hashlib, secrets as _secrets
+
+def _hash_pwd(password: str, salt: str) -> str:
+    return hashlib.sha256((salt + password).encode()).hexdigest()
+
+
+@app.get("/pebepc/client/check-email")
+def check_email(email: str):
+    try:
+        if not email or "@" not in email:
+            return {"success": False, "error": "Email invalide"}
+        uid, models = odoo_connect()
+        partners = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.partner", "search_read",
+            [[["email", "=ilike", email.strip()], ["active", "=", True]]],
+            {"fields": ["id", "name", "x_client_pwd_hash"], "order": "id asc", "limit": 1})
+        if not partners:
+            return {"success": False, "error": "Aucun dossier PEB associé à cet email."}
+        has_password = bool(partners[0].get("x_client_pwd_hash"))
+        return {"success": True, "has_password": has_password}
+    except Exception as e:
+        logging.error(f"check_email error: {e}")
+        return {"success": False, "error": str(e)}
+
+
+class AuthRequest(BaseModel):
+    email: str
+    password: str
+
+
+@app.post("/pebepc/client/login")
+def client_login(req: AuthRequest):
+    try:
+        uid, models = odoo_connect()
+        partners = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.partner", "search_read",
+            [[["email", "=ilike", req.email.strip()], ["active", "=", True]]],
+            {"fields": ["id", "name", "x_client_pwd_hash"], "order": "id asc", "limit": 1})
+        if not partners:
+            return {"success": False, "error": "Email introuvable."}
+        partner = partners[0]
+        stored = partner.get("x_client_pwd_hash") or ""
+        if not stored:
+            return {"success": False, "error": "Aucun mot de passe défini. Créez-en un d'abord."}
+        try:
+            salt, hashed = stored.split(":", 1)
+        except ValueError:
+            return {"success": False, "error": "Données corrompues, contactez le support."}
+        if _hash_pwd(req.password, salt) != hashed:
+            return {"success": False, "error": "Mot de passe incorrect."}
+        # Retourner les missions
+        partner_ids_all = [p["id"] for p in models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.partner", "search_read",
+            [[["email", "=ilike", req.email.strip()], ["active", "=", True]]],
+            {"fields": ["id"], "limit": 10})]
+        missions = _fetch_missions(uid, models, partner_ids_all)
+        return {"success": True, "name": partner["name"], "missions": missions}
+    except Exception as e:
+        logging.error(f"client_login error: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/pebepc/client/set-password")
+def client_set_password(req: AuthRequest):
+    try:
+        if len(req.password) < 6:
+            return {"success": False, "error": "Mot de passe trop court (min. 6 caractères)."}
+        uid, models = odoo_connect()
+        partners = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.partner", "search_read",
+            [[["email", "=ilike", req.email.strip()], ["active", "=", True]]],
+            {"fields": ["id", "name", "x_client_pwd_hash"], "order": "id asc", "limit": 1})
+        if not partners:
+            return {"success": False, "error": "Email introuvable."}
+        partner = partners[0]
+        if partner.get("x_client_pwd_hash"):
+            return {"success": False, "error": "Un mot de passe existe déjà. Utilisez la connexion normale."}
+        salt = _secrets.token_hex(16)
+        hashed = _hash_pwd(req.password, salt)
+        models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.partner", "write",
+            [[partner["id"]], {"x_client_pwd_hash": salt + ":" + hashed}])
+        partner_ids_all = [p["id"] for p in models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.partner", "search_read",
+            [[["email", "=ilike", req.email.strip()], ["active", "=", True]]],
+            {"fields": ["id"], "limit": 10})]
+        missions = _fetch_missions(uid, models, partner_ids_all)
+        return {"success": True, "name": partner["name"], "missions": missions}
+    except Exception as e:
+        logging.error(f"client_set_password error: {e}")
+        return {"success": False, "error": str(e)}
+
+
+def _fetch_missions(uid, models, partner_ids):
+    events = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "search_read",
+        [[["partner_ids", "in", partner_ids], ["active", "=", True]]],
+        {"fields": ["id", "name", "start", "x_studio_adresse_du_bien",
+                    "x_studio_informations_sur_le_bien", "x_studio_statut_draft",
+                    "x_studio_client_token", "x_studio_pdf_provisoire",
+                    "x_studio_pdf_definitif"],
+         "order": "start desc", "limit": 50})
+    statut_map = {
+        "false":          {"label": "En attente",       "color": "#3B82F6"},
+        "none":           {"label": "En attente",       "color": "#3B82F6"},
+        "draft_sent":     {"label": "PEB provisoire",   "color": "#F59E0B"},
+        "draft_refused":  {"label": "PEB refusé",       "color": "#EF4444"},
+        "draft_accepted": {"label": "PEB accepté",      "color": "#10B981"},
+        "closed":         {"label": "Dossier clôturé",  "color": "#6B7280"},
+    }
+    missions = []
+    for ev in (events or []):
+        infos = ev.get("x_studio_informations_sur_le_bien", "") or ""
+        type_bien = superficie = ""
+        tm = re.search(r"Type\s*:\s*(.+)", infos)
+        if tm: type_bien = tm.group(1).strip()
+        sm = re.search(r"Superficie\s*:\s*(.+)", infos)
+        if sm: superficie = sm.group(1).strip()
+        statut_raw = str(ev.get("x_studio_statut_draft") or "false")
+        si = statut_map.get(statut_raw, {"label": statut_raw, "color": "#6B7280"})
+        missions.append({
+            "id": ev["id"], "name": ev["name"],
+            "start": ev.get("start", ""),
+            "adresse": ev.get("x_studio_adresse_du_bien", "") or "",
+            "type_bien": type_bien, "superficie": superficie,
+            "statut": statut_raw, "statut_label": si["label"], "statut_color": si["color"],
+            "token": ev.get("x_studio_client_token") or "",
+            "has_pdf": bool(ev.get("x_studio_pdf_provisoire")),
+            "has_pdf_final": bool(ev.get("x_studio_pdf_definitif")),
+        })
+    return missions
+
+
 # ── DASHBOARD CLIENT ───────────────────────────────────────
 
 @app.get("/pebepc/client/missions")
