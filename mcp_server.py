@@ -223,3 +223,7 @@ def delete_website_page(page_id: int) -> dict:
         except Exception:
             pass
     return {"success": True, "page_id": page_id}
+
+
+if __name__ == "__main__":
+    mcp.run()
