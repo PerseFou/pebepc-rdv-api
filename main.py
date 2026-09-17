@@ -4,9 +4,9 @@ import secrets
 import re
 import base64
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Form, UploadFile, File
+from fastapi import FastAPI, Form, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, JSONResponse
+from fastapi.responses import Response, JSONResponse, HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from typing import Optional
 
@@ -1100,6 +1100,28 @@ def get_expert_mission(token: str):
     except Exception as e:
         logging.error(f"get_expert_mission error: {e}")
         return {"success": False, "error": str(e)}
+
+
+# ── Hub login ─────────────────────────────────────────────────
+HUB_TOKEN = "pebepc_hub_2025_xK9m"
+
+@app.get("/hub/login", response_class=HTMLResponse)
+def hub_login(token: str = Query(...)):
+    if token != HUB_TOKEN:
+        return RedirectResponse(url="https://www.pebepc.com/web/login", status_code=302)
+    return HTMLResponse(content="""<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8"/>
+  <meta http-equiv="refresh" content="1;url=https://www.pebepc.com"/>
+  <title>Connexion...</title>
+  <style>
+    body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#0E2949;color:#fff;}
+    p{font-size:1.1rem;opacity:.85;}
+  </style>
+</head>
+<body><p>Connexion...</p></body>
+</html>""")
 
 
 # ── MCP (monté en dernier pour ne pas intercepter les routes ci-dessus) ──
