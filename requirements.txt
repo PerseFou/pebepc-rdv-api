@@ -3,3 +3,4 @@ uvicorn==0.29.0
 python-multipart==0.0.9
 requests==2.32.3
 mcp==1.12.4
+PyJWT==2.8.0

@@ -1102,25 +1102,66 @@ def get_expert_mission(token: str):
         return {"success": False, "error": str(e)}
 
 
-# ── Hub login ─────────────────────────────────────────────────
-HUB_TOKEN = "pebepc_hub_2025_xK9m"
+# ── Hub admin auth ────────────────────────────────────────────
+import jwt as _jwt, datetime as _dt
+
+HUB_TOKEN          = "pebepc_hub_2025_xK9m"
+HUB_ADMIN_EMAIL    = os.environ.get("HUB_ADMIN_EMAIL", "")
+HUB_ADMIN_PASSWORD = os.environ.get("HUB_ADMIN_PASSWORD", "")
+JWT_SECRET         = os.environ.get("JWT_SECRET", "peb-pulse-secret")
+
+
+class AdminLoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+@app.post("/api/auth/login")
+def admin_login(body: AdminLoginRequest):
+    if body.email != HUB_ADMIN_EMAIL or body.password != HUB_ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Identifiants incorrects")
+    token = _jwt.encode(
+        {"sub": body.email, "exp": _dt.datetime.utcnow() + _dt.timedelta(hours=24)},
+        JWT_SECRET, algorithm="HS256"
+    )
+    return {"token": token, "email": body.email}
+
+
+def _make_admin_jwt() -> str:
+    """Génère un JWT admin côté serveur — les credentials ne quittent jamais Python."""
+    return _jwt.encode(
+        {"sub": HUB_ADMIN_EMAIL, "exp": _dt.datetime.utcnow() + _dt.timedelta(hours=24)},
+        JWT_SECRET, algorithm="HS256"
+    )
+
 
 @app.get("/hub/login", response_class=HTMLResponse)
 def hub_login(token: str = Query(...)):
     if token != HUB_TOKEN:
         return RedirectResponse(url="https://www.pebepc.com/web/login", status_code=302)
-    return HTMLResponse(content="""<!DOCTYPE html>
+    jwt_token = _make_admin_jwt()
+    return HTMLResponse(content=f"""<!DOCTYPE html>
 <html lang="fr">
 <head>
   <meta charset="UTF-8"/>
-  <meta http-equiv="refresh" content="1;url=https://www.pebepc.com"/>
   <title>Connexion...</title>
   <style>
-    body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#0E2949;color:#fff;}
-    p{font-size:1.1rem;opacity:.85;}
+    body{{font-family:system-ui,sans-serif;display:flex;flex-direction:column;align-items:center;
+         justify-content:center;height:100vh;margin:0;background:#0E2949;color:#fff;gap:14px;}}
+    .dot{{width:10px;height:10px;border-radius:50%;background:#ED6C23;animation:p 1.2s infinite;}}
+    @keyframes p{{0%,100%{{opacity:.3}}50%{{opacity:1}}}}
+    p{{font-size:1rem;opacity:.75;}}
   </style>
 </head>
-<body><p>Connexion...</p></body>
+<body>
+  <div class="dot"></div>
+  <p>Connexion en cours...</p>
+  <script>
+    localStorage.setItem('peb_token', {repr(jwt_token)});
+    localStorage.setItem('peb_user', JSON.stringify({{email: {repr(HUB_ADMIN_EMAIL)}}}));
+    window.location.href = 'https://www.pebepc.com';
+  </script>
+</body>
 </html>""")
 
 
