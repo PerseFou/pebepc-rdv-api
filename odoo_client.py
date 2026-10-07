@@ -9,6 +9,11 @@ ODOO_USER     = os.getenv("ODOO_USER", "armine.sotodeh10@gmail.com")
 ODOO_PASSWORD = os.getenv("ODOO_PASSWORD", "")
 EXPERT_NAME   = "Armine Sotodeh"
 
+# Expéditrice des e-mails envoyés aux clients (nom affiché, adresse et signature)
+SENDER_NAME   = os.getenv("SENDER_NAME", "Charlotte Vanderkelen")
+SENDER_EMAIL  = os.getenv("SENDER_EMAIL", "charlotte@pebpulse.be")
+SENDER_TITLE  = os.getenv("SENDER_TITLE", "Experte PEB")
+
 
 def odoo_connect():
     logging.info(f"Connexion Odoo: {ODOO_URL} / {ODOO_DB} / {ODOO_USER}")

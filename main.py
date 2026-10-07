@@ -10,7 +10,7 @@ from fastapi.responses import Response, JSONResponse, HTMLResponse, RedirectResp
 from pydantic import BaseModel
 from typing import Optional
 
-from odoo_client import odoo_connect, get_mission_info, ODOO_DB, ODOO_USER, ODOO_PASSWORD, EXPERT_NAME
+from odoo_client import odoo_connect, get_mission_info, ODOO_DB, ODOO_USER, ODOO_PASSWORD, EXPERT_NAME, SENDER_NAME, SENDER_EMAIL, SENDER_TITLE
 from mcp_server import mcp
 
 logging.basicConfig(level=logging.INFO)
@@ -54,6 +54,13 @@ app.add_middleware(MCPAuthMiddleware)
 RAILWAY_URL = os.getenv("RAILWAY_URL", "https://web-production-5789.up.railway.app")
 
 
+# Signature commune des e-mails envoyés aux clients
+SIGNATURE_HTML = (
+    f'<p style="color:#8a9bb5;font-size:0.78rem;">{SENDER_NAME} - {SENDER_TITLE}<br/>'
+    f'<a href="mailto:{SENDER_EMAIL}" style="color:#1B3A8C;">{SENDER_EMAIL}</a></p>'
+)
+
+
 def send_odoo_mail(uid, models, email_to, subject, body_html):
     try:
         mail_id = models.execute_kw(
@@ -63,7 +70,8 @@ def send_odoo_mail(uid, models, email_to, subject, body_html):
                 "subject":    subject,
                 "body_html":  body_html,
                 "email_to":   email_to,
-                "email_from": ODOO_USER,
+                "email_from": f'"{SENDER_NAME}" <{SENDER_EMAIL}>',
+                "reply_to":   SENDER_EMAIL,
                 "auto_delete": True
             }]
         )
@@ -235,7 +243,7 @@ def submit_rdv(req: SubmitRequest):
 
             # Confirmation client
             send_odoo_mail(uid, models, req.email,
-                "Votre demande de Certificat Electrique a bien été reçue",
+                "Réception de votre demande — Certificat Électrique",
                 f"""<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
     <div style="background:linear-gradient(135deg,#F59E0B,#FBBF24);padding:24px 28px;border-radius:12px 12px 0 0;">
         <h1 style="color:#fff;font-size:1.2rem;margin:0;">Demande reçue !</h1>
@@ -244,9 +252,9 @@ def submit_rdv(req: SubmitRequest):
         <p style="color:#374151;">Bonjour <strong>{req.prenom} {req.nom}</strong>,</p>
         <p style="color:#374151;">Nous avons bien reçu votre demande de Certificat Electrique pour :</p>
         <p style="background:#f4f6fb;padding:12px;border-radius:8px;color:#1B3A8C;font-weight:bold;">{adresse}</p>
-        <p style="color:#374151;">Nous vous contacterons prochainement pour confirmer le rendez-vous.</p>
+        <p style="color:#374151;">Vous recevrez un <strong>e-mail de confirmation</strong> dès que votre rendez-vous aura été validé par notre équipe.</p>
         <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;"/>
-        <p style="color:#8a9bb5;font-size:0.78rem;">Armine Sotodeh — Expert PEB &amp; Certificat Electrique</p>
+        {SIGNATURE_HTML}
     </div>
 </div>""")
 
@@ -316,7 +324,7 @@ def submit_rdv(req: SubmitRequest):
 
         # ── Mail confirmation client ──
         service_label = "Pack PEB + Certificat Electrique" if is_pack else "certification PEB"
-        subject_client = f"Confirmation de votre demande de RDV — {service_label}"
+        subject_client = f"Réception de votre demande — {service_label}"
         body_client = f"""<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
     <div style="background:linear-gradient(135deg,{'#DC2626,#EF4444' if is_express else '#1B3A8C,#3B82F6'});padding:24px 28px;border-radius:12px 12px 0 0;">
         <h1 style="color:#fff;font-size:1.2rem;margin:0;">{'⚡ ' if is_express else ''}Votre demande de RDV a bien été enregistrée</h1>
@@ -330,10 +338,9 @@ def submit_rdv(req: SubmitRequest):
             <tr><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Type de bien</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.type_bien} - {req.superficie}</td></tr>
             <tr style="background:#f4f6fb;"><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Créneau souhaité</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.creneau_label}</td></tr>
         </table>
-        <p style="color:#374151;">Notre expert vous contactera prochainement pour confirmer le rendez-vous.</p>
+        <p style="color:#374151;">Vous recevrez un <strong>e-mail de confirmation</strong> dès que votre rendez-vous aura été validé par notre équipe.</p>
         <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;"/>
-        <p style="color:#8a9bb5;font-size:0.78rem;">Armine Sotodeh - Expert PEB<br/>
-        <a href="mailto:{ODOO_USER}" style="color:#1B3A8C;">{ODOO_USER}</a></p>
+        {SIGNATURE_HTML}
     </div>
 </div>"""
         send_odoo_mail(uid, models, req.email, subject_client, body_client)
@@ -389,7 +396,7 @@ async def send_draft(
 </div>
         <p style="color:#8a9bb5;font-size:0.82rem;">Lien : <a href="{client_link}" style="color:#1B3A8C;">{client_link}</a></p>
         <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;"/>
-        <p style="color:#8a9bb5;font-size:0.78rem;">Armine Sotodeh - Expert PEB</p>
+        {SIGNATURE_HTML}
     </div>
 </div>"""
             send_odoo_mail(uid, models, client_email, subject, body_html)
@@ -438,7 +445,7 @@ async def send_final(
         <p style="background:#f0fdf4;padding:12px;border-radius:8px;color:#16a34a;font-weight:bold;">{adresse}</p>
         {"<div style='text-align:center;margin:28px 0;'><a href='" + pdf_link + "' style='background:#10B981;color:#fff;padding:14px 20px;border-radius:12px;text-decoration:none;font-weight:bold;font-size:0.95rem;display:inline-block;max-width:90%;word-break:break-word;'>Telecharger mon certificat PEB</a></div>" if pdf_link else ""}
         <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;"/>
-        <p style="color:#8a9bb5;font-size:0.78rem;">Armine Sotodeh - Expert PEB</p>
+        {SIGNATURE_HTML}
     </div>
 </div>"""
             send_odoo_mail(uid, models, client_email, subject, body_html)
