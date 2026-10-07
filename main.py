@@ -10,7 +10,7 @@ from fastapi.responses import Response, JSONResponse, HTMLResponse, RedirectResp
 from pydantic import BaseModel
 from typing import Optional
 
-from odoo_client import odoo_connect, get_mission_info, ODOO_DB, ODOO_USER, ODOO_PASSWORD, EXPERT_NAME, SENDER_NAME, SENDER_EMAIL, SENDER_TITLE
+from odoo_client import odoo_connect, get_mission_info, ODOO_DB, ODOO_USER, ODOO_PASSWORD, EXPERT_NAME, SENDER_NAME, SENDER_EMAIL, SENDER_TITLE, SITE_URL
 from mcp_server import mcp
 
 logging.basicConfig(level=logging.INFO)
@@ -316,7 +316,7 @@ def submit_rdv(req: SubmitRequest):
             <tr><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Email</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.email}</td></tr>
         </table>
         <div style="text-align:center;margin:20px 0;">
-            <a href="https://www.pebepc.com/peb-dashboard" style="background:#1B3A8C;color:#fff;padding:12px 28px;border-radius:999px;text-decoration:none;font-weight:bold;">Voir le dashboard</a>
+            <a href="{SITE_URL}/peb-dashboard" style="background:#1B3A8C;color:#fff;padding:12px 28px;border-radius:999px;text-decoration:none;font-weight:bold;">Voir le dashboard</a>
         </div>
     </div>
 </div>"""
@@ -378,7 +378,7 @@ async def send_draft(
         client_email = infos.get("email", "")
         client_nom   = infos.get("nom", "le mandataire")
         adresse      = infos.get("adresse", "")
-        client_link  = f"https://www.pebepc.com/peb-pulse-token?token={token}"
+        client_link  = f"{SITE_URL}/peb-pulse-token?token={token}"
 
         if client_email:
             subject   = "Votre PEB provisoire est disponible"
@@ -431,7 +431,7 @@ async def send_final(
 
         token_ev = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "read", [[event_id]], {"fields": ["x_studio_client_token"]})
         token    = token_ev[0].get("x_studio_client_token", "") if token_ev else ""
-        pdf_link = f"https://www.pebepc.com/peb-pulse-token?token={token}" if token else ""
+        pdf_link = f"{SITE_URL}/peb-pulse-token?token={token}" if token else ""
 
         if client_email:
             subject   = "Votre certificat PEB definitif est disponible"
@@ -571,7 +571,7 @@ def accept_mission(token: str):
         <p style="background:#f0fdf4;padding:12px;border-radius:8px;color:#16a34a;font-weight:bold;">{adresse}</p>
         <p style="color:#374151;">Vous pouvez maintenant envoyer le PEB definitif depuis le dashboard.</p>
         <div style="text-align:center;margin:20px 0;">
-            <a href="https://www.pebepc.com/peb-dashboard" style="background:#1B3A8C;color:#fff;padding:12px 28px;border-radius:999px;text-decoration:none;font-weight:bold;">Voir le dashboard</a>
+            <a href="{SITE_URL}/peb-dashboard" style="background:#1B3A8C;color:#fff;padding:12px 28px;border-radius:999px;text-decoration:none;font-weight:bold;">Voir le dashboard</a>
         </div>
     </div>
 </div>"""
@@ -615,7 +615,7 @@ def refuse_mission(token: str, req: RefuseRequest):
         <p style="background:#fff8e7;padding:12px;border-radius:8px;color:#92610a;border:1px solid #f9ca66;">{remarques}</p>
         <p style="color:#374151;">Apportez les corrections et renvoyez un nouveau PEB provisoire.</p>
         <div style="text-align:center;margin:20px 0;">
-            <a href="https://www.pebepc.com/peb-dashboard" style="background:#1B3A8C;color:#fff;padding:12px 28px;border-radius:999px;text-decoration:none;font-weight:bold;">Voir le dashboard</a>
+            <a href="{SITE_URL}/peb-dashboard" style="background:#1B3A8C;color:#fff;padding:12px 28px;border-radius:999px;text-decoration:none;font-weight:bold;">Voir le dashboard</a>
         </div>
     </div>
 </div>"""
@@ -629,7 +629,7 @@ def refuse_mission(token: str, req: RefuseRequest):
 
 # ── CHAT CLIENT ────────────────────────────────────────────
 
-CHARLOTTE_PARTNER_ID = 12  # res.partner id de charlotte@pebepc.com
+CHARLOTTE_PARTNER_ID = 12  # res.partner id de Charlotte
 
 
 @app.get("/pebepc/chat/{token}")
@@ -1145,7 +1145,7 @@ def _make_admin_jwt() -> str:
 @app.get("/hub/login", response_class=HTMLResponse)
 def hub_login(token: str = Query(...)):
     if token != HUB_TOKEN:
-        return RedirectResponse(url="https://www.pebepc.com/web/login", status_code=302)
+        return RedirectResponse(url=f"{SITE_URL}/web/login", status_code=302)
     jwt_token = _make_admin_jwt()
     return HTMLResponse(content=f"""<!DOCTYPE html>
 <html lang="fr">
@@ -1166,7 +1166,7 @@ def hub_login(token: str = Query(...)):
   <script>
     localStorage.setItem('peb_token', {repr(jwt_token)});
     localStorage.setItem('peb_user', JSON.stringify({{email: {repr(HUB_ADMIN_EMAIL)}}}));
-    window.location.href = 'https://www.pebepc.com';
+    window.location.href = '{SITE_URL}';
   </script>
 </body>
 </html>""")
