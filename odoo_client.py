@@ -14,6 +14,9 @@ SENDER_NAME   = os.getenv("SENDER_NAME", "Charlotte Vanderkelen")
 SENDER_EMAIL  = os.getenv("SENDER_EMAIL", "charlotte@pebpulse.be")
 SENDER_TITLE  = os.getenv("SENDER_TITLE", "Experte PEB")
 
+# Adresse du site public (liens des e-mails : token client, dashboard, connexion)
+SITE_URL      = os.getenv("SITE_URL", "https://www.pebpulse.be").rstrip("/")
+
 
 def odoo_connect():
     logging.info(f"Connexion Odoo: {ODOO_URL} / {ODOO_DB} / {ODOO_USER}")
