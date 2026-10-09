@@ -12,6 +12,7 @@ from typing import Optional
 
 from odoo_client import odoo_connect, get_mission_info, ODOO_DB, ODOO_USER, ODOO_PASSWORD, EXPERT_NAME, SENDER_NAME, SENDER_EMAIL, SENDER_TITLE, SITE_URL
 from mcp_server import mcp
+import travel
 
 logging.basicConfig(level=logging.INFO)
 
@@ -90,6 +91,14 @@ class TakenSlotsRequest(BaseModel):
     stop: str
 
 
+class NearbySlotsRequest(BaseModel):
+    start: str
+    stop: str
+    rue: str
+    cp: Optional[str] = ""
+    ville: Optional[str] = ""
+
+
 class SubmitRequest(BaseModel):
     prenom: str
     nom: str
@@ -150,6 +159,53 @@ def taken_slots(req: TakenSlotsRequest):
     except Exception as e:
         logging.error(f"taken_slots error: {e}")
         return {"slots": []}
+
+
+@app.post("/pebepc/rdv/nearby_slots")
+def nearby_slots(req: NearbySlotsRequest):
+    """Rendez-vous de la période + temps de trajet (minutes) entre chacun et l'adresse du client.
+
+    Réponse : {"ok": bool, "client_found": bool, "slots": [{"start", "stop", "travel"}]}
+    travel = None si l'adresse du rendez-vous est inconnue ou introuvable.
+    ok = False si le calcul des trajets n'est pas disponible (pas de clé ORS, service en panne) :
+    la page garde alors la marge fixe habituelle.
+    """
+    try:
+        uid, models = odoo_connect()
+        events = models.execute_kw(
+            ODOO_DB, uid, ODOO_PASSWORD,
+            "calendar.event", "search_read",
+            [[["start", ">=", req.start], ["stop", "<=", req.stop], ["active", "=", True]]],
+            {"fields": ["start", "stop", "name", "location", "x_studio_adresse_du_bien"], "limit": 500}
+        ) or []
+    except Exception as e:
+        logging.error(f"nearby_slots odoo: {e}")
+        return {"ok": False, "client_found": False, "slots": []}
+
+    slots = [{"start": e["start"], "stop": e["stop"], "travel": None} for e in events]
+    if not travel.enabled():
+        return {"ok": False, "client_found": False, "slots": slots}
+
+    client_addr = f"{req.rue}, {(req.cp or '').strip()} {(req.ville or '').strip()}, Belgique"
+    client = travel.geocode(client_addr)
+    if client is None:
+        logging.info(f"nearby_slots: adresse client introuvable ({client_addr})")
+        return {"ok": False, "client_found": False, "slots": slots}
+
+    # Géocodage des rendez-vous (mis en cache) puis un seul calcul de matrice
+    points, idx = [], []
+    for i, ev in enumerate(events):
+        coords = travel.geocode(travel.event_address(ev))
+        if coords is not None:
+            idx.append(i)
+            points.append(coords)
+    durations = travel.durations_from(client, points)
+    if durations is None:
+        return {"ok": False, "client_found": True, "slots": slots}
+    for i, d in zip(idx, durations):
+        slots[i]["travel"] = d
+    logging.info(f"nearby_slots: {len(events)} RDV, {len(points)} localisés")
+    return {"ok": True, "client_found": True, "slots": slots}
 
 
 @app.post("/pebepc/rdv/submit")
