@@ -4,7 +4,8 @@ import secrets
 import re
 import base64
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Form, UploadFile, File, Query
+from fastapi import FastAPI, Form, UploadFile, File, Query, Header
+from datetime import datetime, timedelta, timezone
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, JSONResponse, HTMLResponse, RedirectResponse
 from pydantic import BaseModel
@@ -43,8 +44,17 @@ class MCPAuthMiddleware:
 
 app = FastAPI(lifespan=lifespan)
 
+class PartnerAwareCORS(CORSMiddleware):
+    """CORS standard, sauf pour /pebepc/partner/* (appels serveur à serveur uniquement)."""
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["path"].startswith("/pebepc/partner"):
+            await self.app(scope, receive, send)
+            return
+        await super().__call__(scope, receive, send)
+
+
 app.add_middleware(
-    CORSMiddleware,
+    PartnerAwareCORS,
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
@@ -127,6 +137,8 @@ class SubmitRequest(BaseModel):
     type_service: Optional[str] = "peb"
     # express: True = livraison urgente, badge ⚡ dans le dashboard
     express: Optional[bool] = False
+    # source: partenaire apporteur (ex. "BNP", "BNP - CertElec"), exposé à Berex
+    source: Optional[str] = ""
 
 
 class RefuseRequest(BaseModel):
@@ -249,6 +261,9 @@ def submit_rdv(req: SubmitRequest):
             x_infos += "\n\nSERVICE : PEB + Certificat Electrique"
         elif is_elec_only:
             x_infos += "\n\nSERVICE : Certificat Electrique"
+        source = (req.source or "").strip()
+        if source:
+            x_infos += f"\n\nSource : {source}"
 
         # ── Facture (tous les services) ──
         invoice_id = None
@@ -314,7 +329,30 @@ def submit_rdv(req: SubmitRequest):
     </div>
 </div>""")
 
-            return {"success": True, "event_id": None, "invoice_id": invoice_id}
+            # calendar.event aussi pour l'électrique seul (suivi dashboard + partenaires)
+            event_id = None
+            try:
+                expert_id = find_or_create_partner(ODOO_USER, EXPERT_NAME)
+                partner_ids = [expert_id]
+                if client_id and client_id != expert_id: partner_ids.append(client_id)
+                if req.contact_place_email:
+                    place_id = find_or_create_partner(req.contact_place_email, req.contact_place_nom or req.contact_place_email, req.contact_place_tel)
+                    if place_id not in partner_ids: partner_ids.append(place_id)
+                express_prefix = "⚡ EXPRESS — " if is_express else ""
+                event_id = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "create", [{
+                    "name": f"{express_prefix}Certificat Electrique — {req.type_bien} {req.superficie} — {adresse}",
+                    "start": req.start_utc, "stop": req.stop_utc,
+                    "description": f"Creneau : {req.creneau_label}\nAdresse : {adresse}\n\n{x_infos}",
+                    "partner_ids": [[6, 0, partner_ids]],
+                    "privacy": "confidential"
+                }], {"context": {"no_mail_to_attendees": True}})
+                vals = {"x_studio_adresse_du_bien": adresse, "x_studio_informations_sur_le_bien": x_infos}
+                if invoice_id: vals["x_studio_facture_liee"] = invoice_id
+                models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "write", [[event_id], vals])
+            except Exception as e:
+                logging.warning(f"Event certificat electrique: {e}")
+
+            return {"success": True, "event_id": event_id, "invoice_id": invoice_id}
 
         # ── PEB ou PACK : création du calendar.event ──
         expert_id = find_or_create_partner(ODOO_USER, EXPERT_NAME)
@@ -406,6 +444,93 @@ def submit_rdv(req: SubmitRequest):
     except Exception as e:
         logging.error(f"submit_rdv error: {e}")
         return {"success": False, "error": str(e)}
+
+
+# ── PARTENAIRES (Berex, serveur à serveur) ─────────────────
+
+BEREX_PARTNER_KEY = os.getenv("BEREX_PARTNER_KEY", "")
+
+
+class PartnerMissionsRequest(BaseModel):
+    source: str
+
+
+def _infos_value(label, text):
+    m = re.search(rf"{label}\s*:\s*(.+)", text or "")
+    return m.group(1).strip() if m else ""
+
+
+@app.post("/pebepc/partner/missions")
+def partner_missions(req: PartnerMissionsRequest, x_berex_key: Optional[str] = Header(default=None, alias="X-Berex-Key")):
+    if not BEREX_PARTNER_KEY or not x_berex_key or not secrets.compare_digest(x_berex_key, BEREX_PARTNER_KEY):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    src = (req.source or "").strip()
+    if not src:
+        return {"missions": []}
+    try:
+        uid, models = odoo_connect()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        since = (now - timedelta(days=365)).strftime("%Y-%m-%d %H:%M:%S")
+        events = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "search_read",
+            [[["start", ">=", since],
+              ["x_studio_informations_sur_le_bien", "ilike", f"Source : {src}"],
+              "|", ["active", "=", True], ["active", "=", False]]],
+            {"fields": ["id", "name", "start", "active", "x_studio_adresse_du_bien",
+                        "x_studio_informations_sur_le_bien", "x_studio_statut_draft",
+                        "x_studio_client_token"],
+             "order": "start desc", "limit": 1000,
+             "context": {"active_test": False}})
+
+        missions = []
+        for ev in (events or []):
+            infos = ev.get("x_studio_informations_sur_le_bien") or ""
+            ev_source = _infos_value("Source", infos)
+            if not (ev_source == src or ev_source.startswith(src)):
+                continue
+            name = ev.get("name") or ""
+            service = _infos_value("SERVICE", infos)
+            if "PEB + Certificat" in service or "[PEB + Él" in name or "[PEB + El" in name:
+                mtype, label = "peb", "Certificat PEB + électrique"
+            elif service == "Certificat Electrique":
+                mtype, label = "elec", "Certificat électrique"
+            else:
+                mtype, label = "peb", "Certificat PEB"
+
+            mand = infos.split("MANDATAIRE")
+            requester = _infos_value("Nom", mand[1]) if len(mand) > 1 else ""
+
+            start = ev.get("start") or ""
+            token = ev.get("x_studio_client_token") or ""
+            report_url = ""
+            if not ev.get("active", True):
+                status = "cancelled"
+            elif str(ev.get("x_studio_statut_draft") or "") == "closed" and token:
+                status = "report"
+                report_url = f"{RAILWAY_URL}/pebepc/mission/{token}/pdf/final"
+            else:
+                try:
+                    future = datetime.strptime(start, "%Y-%m-%d %H:%M:%S") > now
+                except ValueError:
+                    future = False
+                status = "planned" if future else "done"
+
+            missions.append({
+                "type": mtype,
+                "label": label,
+                "ref": str(ev["id"]),
+                "address": ev.get("x_studio_adresse_du_bien") or "",
+                "date_start": start,
+                "status": status,
+                "expert": EXPERT_NAME,
+                "requester": requester,
+                "report_url": report_url,
+            })
+            if len(missions) >= 300:
+                break
+        return {"missions": missions}
+    except Exception as e:
+        logging.error(f"partner_missions error: {e}")
+        return JSONResponse({"error": "internal_error"}, status_code=500)
 
 
 # ── DASHBOARD / WORKFLOW CLIENT ────────────────────────────
