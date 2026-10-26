@@ -263,7 +263,12 @@ def taken_slots(req: TakenSlotsRequest):
         # Congés : jour bloqué seulement si plus aucune experte n'est disponible
         try:
             for k in _blocked_days(uid, models, req.start[:10], req.stop[:10]):
-                slots.append({"start": k + " 00:00:00", "stop": k + " 23:59:59", "expertEmail": ODOO_USER, "indispo": True})
+                # Un créneau de 30 min toutes les 30 min : la page grise créneau par créneau
+                for m in range(0, 24 * 60, 30):
+                    t1 = f"{k} {m // 60:02d}:{m % 60:02d}:00"
+                    m2 = m + 30
+                    t2 = f"{k} {m2 // 60:02d}:{m2 % 60:02d}:00" if m2 < 1440 else f"{k} 23:59:59"
+                    slots.append({"start": t1, "stop": t2, "expertEmail": ODOO_USER, "indispo": True})
         except Exception as e:
             logging.error(f"taken_slots conges error: {e}")
         logging.info(f"taken_slots: {len(slots)} creneaux bloques")
