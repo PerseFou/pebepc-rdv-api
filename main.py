@@ -139,6 +139,8 @@ class SubmitRequest(BaseModel):
     express: Optional[bool] = False
     # source: partenaire apporteur (ex. "BNP", "BNP - CertElec"), exposé à Berex
     source: Optional[str] = ""
+    # expert_id: experte choisie par le formulaire (id res.users ou res.partner de Charlotte/Emma)
+    expert_id: Optional[int] = None
 
 
 class RefuseRequest(BaseModel):
@@ -180,21 +182,245 @@ def root():
     return {"status": "ok", "service": "pebepc-rdv-api"}
 
 
+# ── CONGÉS DES EXPERTES (événements "INDISPO — …" créés par le dashboard) ──
+
+EXPERTS_CONFIG_KEY = "peb_pulse.experts_config"
+
+
+def _blocked_days(uid, models, day_from, day_to):
+    """Jours (AAAA-MM-JJ) entre day_from et day_to où AUCUNE experte active n'est disponible
+    (congé INDISPO, experte désactivée, ou hors de ses dates de début/fin)."""
+    import json
+    from datetime import date as _date
+    cfg = {}
+    try:
+        rows = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "ir.config_parameter", "search_read",
+            [[["key", "=", EXPERTS_CONFIG_KEY]]], {"fields": ["value"], "limit": 1})
+        if rows and rows[0].get("value"):
+            cfg = json.loads(rows[0]["value"])
+    except Exception as e:
+        logging.error(f"experts_config illisible: {e}")
+
+    leaves = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "search_read",
+        [[["name", "=ilike", "INDISPO%"], ["active", "=", True],
+          ["start", "<=", day_to + " 23:59:59"], ["stop", ">=", day_from + " 00:00:00"]]],
+        {"fields": ["user_id", "allday", "start_date", "stop_date", "start", "stop"], "limit": 1000})
+    off = {}
+    for ev in leaves or []:
+        if not ev.get("user_id"):
+            continue
+        u = ev["user_id"][0]
+        d1 = (ev.get("start_date") if ev.get("allday") else None) or (ev.get("start") or "")[:10]
+        d2 = (ev.get("stop_date") if ev.get("allday") else None) or (ev.get("stop") or "")[:10] or d1
+        if d1:
+            off.setdefault(u, []).append((d1, d2))
+
+    # Même liste d'expertes que le dashboard (Charlotte et Emma)
+    logins = ["charlotte@pebpulse.be", "emma@pebpulse.be"]
+    users = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.users", "search_read",
+        [["&", ["share", "=", False], "|", "|", "|", ["login", "in", logins], ["email", "in", logins],
+          ["name", "ilike", "Charlotte"], ["name", "ilike", "Emma"]]],
+        {"fields": ["id"]})
+    experts = {}
+    for u in users or []:
+        c = (cfg or {}).get(str(u["id"])) or {}
+        if c.get("active", True) is not False:
+            experts[u["id"]] = c
+    logging.info(f"blocked_days: expertes={list(experts)} conges={ {k: v for k, v in off.items()} }")
+    if not experts:
+        return []
+
+    def dispo(u, c, k):
+        if c.get("start") and k < c["start"]:
+            return False
+        if c.get("end") and k > c["end"]:
+            return False
+        return not any(a <= k <= b for a, b in off.get(u, []))
+
+    out = []
+    d = _date.fromisoformat(day_from)
+    end = _date.fromisoformat(day_to)
+    while d <= end:
+        k = d.isoformat()
+        if not any(dispo(u, c, k) for u, c in experts.items()):
+            out.append(k)
+        d += timedelta(days=1)
+    return out
+
+
+# ── EXPERTES : chargement, attribution, nom ────────────────
+
+EXPERT_LOGINS = ["charlotte@pebpulse.be", "emma@pebpulse.be"]
+UNASSIGNED_EXPERT = "À attribuer"
+
+
+def _load_experts(uid, models):
+    """Expertes connues (Charlotte, Emma), jamais le compte technique.
+    Retourne {user_id: {"name", "partner_id", "cfg"}}."""
+    import json
+    cfg = {}
+    try:
+        rows = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "ir.config_parameter", "search_read",
+            [[["key", "=", EXPERTS_CONFIG_KEY]]], {"fields": ["value"], "limit": 1})
+        if rows and rows[0].get("value"):
+            cfg = json.loads(rows[0]["value"]) or {}
+    except Exception as e:
+        logging.error(f"experts_config illisible: {e}")
+    users = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.users", "search_read",
+        [["&", ["share", "=", False], "|", "|", "|", ["login", "in", EXPERT_LOGINS], ["email", "in", EXPERT_LOGINS],
+          ["name", "ilike", "Charlotte"], ["name", "ilike", "Emma"]]],
+        {"fields": ["id", "name", "login", "partner_id"]})
+    out = {}
+    for u in users or []:
+        if u["id"] == uid or (u.get("login") or "").lower() == (ODOO_USER or "").lower():
+            continue  # compte technique (organisateur API) : jamais une experte
+        out[u["id"]] = {
+            "name": u["name"],
+            "partner_id": u["partner_id"][0] if u.get("partner_id") else None,
+            "cfg": cfg.get(str(u["id"])) or {},
+        }
+    return out
+
+
+def _region_from_cp(cp):
+    try:
+        n = int(str(cp).strip()[:4])
+    except ValueError:
+        return ""
+    if 1000 <= n <= 1299:
+        return "bruxelles"
+    if 1300 <= n <= 1499 or 4000 <= n <= 7999:
+        return "wallonie"
+    return "flandre"
+
+
+def _pick_expert(uid, models, experts, req):
+    """Experte pour le RDV : celle du formulaire (expert_id), sinon une experte libre sur le créneau.
+    Retourne un user_id ou None (à attribuer)."""
+    if req.expert_id:
+        for u_id, e in experts.items():
+            if req.expert_id in (u_id, e["partner_id"]):
+                return u_id
+        logging.warning(f"submit_rdv: expert_id {req.expert_id} inconnu, attribution automatique")
+    if not experts:
+        return None
+    day = (req.start_utc or "")[:10]
+    region = _region_from_cp(req.cp)
+    type_bien = (req.type_bien or "").lower()
+    # Occupées : RDV ou congé (INDISPO) qui chevauche le créneau
+    busy = set()
+    try:
+        evs = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "search_read",
+            [[["start", "<", req.stop_utc], ["stop", ">", req.start_utc], ["active", "=", True],
+              ["user_id", "in", list(experts)]]],
+            {"fields": ["user_id"], "limit": 500})
+        busy = {e["user_id"][0] for e in evs or [] if e.get("user_id")}
+    except Exception as e:
+        logging.warning(f"_pick_expert occupation: {e}")
+    blocked = set()
+    try:
+        blocked = set(_blocked_days_by_expert(uid, models, day).get("off", []))
+    except Exception as e:
+        logging.warning(f"_pick_expert conges: {e}")
+
+    candidates = []
+    for u_id, e in experts.items():
+        c = e["cfg"]
+        if c.get("active", True) is False or u_id in busy or u_id in blocked:
+            continue
+        if c.get("start") and day < c["start"]:
+            continue
+        if c.get("end") and day > c["end"]:
+            continue
+        regions = [str(r).lower() for r in (c.get("regions") or [])]
+        if regions and region and region not in regions:
+            continue
+        types = [str(t).lower() for t in (c.get("types") or [])]
+        if types and type_bien and not any(t in type_bien for t in types):
+            continue
+        prio = c.get("priority", c.get("priorite", 99))
+        try:
+            prio = float(prio)
+        except (TypeError, ValueError):
+            prio = 99
+        candidates.append((prio, e["name"], u_id))
+    if not candidates:
+        logging.info(f"_pick_expert: aucune experte libre le {req.start_utc}")
+        return None
+    return sorted(candidates)[0][2]
+
+
+def _blocked_days_by_expert(uid, models, day):
+    """Expertes en congé (INDISPO) le jour donné : {"off": [user_id, ...]}."""
+    leaves = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "search_read",
+        [[["name", "=ilike", "INDISPO%"], ["active", "=", True],
+          ["start", "<=", day + " 23:59:59"], ["stop", ">=", day + " 00:00:00"]]],
+        {"fields": ["user_id"], "limit": 200})
+    return {"off": [ev["user_id"][0] for ev in leaves or [] if ev.get("user_id")]}
+
+
+def _expert_name(ev, experts):
+    """Nom de l'experte d'un RDV : user_id si c'est une experte, sinon participante experte."""
+    u = ev.get("user_id")
+    if isinstance(u, (list, tuple)) and u and u[0] in experts:
+        return experts[u[0]]["name"]
+    pids = set(ev.get("partner_ids") or [])
+    for e in experts.values():
+        if e["partner_id"] in pids:
+            return e["name"]
+    return UNASSIGNED_EXPERT
+
+
+def _expert_partner_ids(uid, models):
+    try:
+        return {e["partner_id"] for e in _load_experts(uid, models).values() if e["partner_id"]}
+    except Exception as e:
+        logging.warning(f"_expert_partner_ids: {e}")
+        return set()
+
+
 @app.post("/pebepc/rdv/taken_slots")
 def taken_slots(req: TakenSlotsRequest):
     try:
         uid, models = odoo_connect()
+        # Chevauchement avec la période demandée (et plus "contenu dans") : un événement
+        # qui déborde de la semaine doit quand même bloquer ses créneaux.
         events = models.execute_kw(
             ODOO_DB, uid, ODOO_PASSWORD,
             "calendar.event", "search_read",
-            [[["start", ">=", req.start], ["stop", "<=", req.stop], ["active", "=", True]]],
+            [[["start", "<", req.stop], ["stop", ">", req.start], ["active", "=", True],
+              ["name", "not ilike", "INDISPO"]]],
             {"fields": ["start", "stop"], "limit": 500}
         )
-        logging.info(f"taken_slots: {len(events)} evenements trouves")
-        return {"slots": [{"start": e["start"], "stop": e["stop"], "expertEmail": ODOO_USER} for e in (events or [])]}
+        slots = [{"start": e["start"], "stop": e["stop"], "expertEmail": ODOO_USER} for e in (events or [])]
+        # Congés : jour bloqué seulement si plus aucune experte n'est disponible
+        try:
+            for k in _blocked_days(uid, models, req.start[:10], req.stop[:10]):
+                # Un créneau de 30 min toutes les 30 min : la page grise créneau par créneau
+                for m in range(0, 24 * 60, 30):
+                    t1 = f"{k} {m // 60:02d}:{m % 60:02d}:00"
+                    m2 = m + 30
+                    t2 = f"{k} {m2 // 60:02d}:{m2 % 60:02d}:00" if m2 < 1440 else f"{k} 23:59:59"
+                    slots.append({"start": t1, "stop": t2, "expertEmail": ODOO_USER, "indispo": True})
+        except Exception as e:
+            logging.error(f"taken_slots conges error: {e}")
+        logging.info(f"taken_slots: {len(slots)} creneaux bloques")
+        return {"slots": slots}
     except Exception as e:
         logging.error(f"taken_slots error: {e}")
         return {"slots": []}
+
+
+@app.get("/pebepc/rdv/unavailable_days")
+def unavailable_days(days: int = 120):
+    """Contrôle : jours où aucune experte n'est disponible."""
+    try:
+        uid, models = odoo_connect()
+        today = datetime.now().date()
+        return {"days": _blocked_days(uid, models, today.isoformat(), (today + timedelta(days=days)).isoformat())}
+    except Exception as e:
+        logging.error(f"unavailable_days error: {e}")
+        return {"days": [], "error": str(e)}
 
 
 @app.post("/pebepc/rdv/nearby_slots")
@@ -280,6 +506,17 @@ def submit_rdv(req: SubmitRequest):
                 [{"name": name, "email": email.strip().lower(), "phone": phone}])
 
         client_id = find_or_create_partner(req.email, f"{req.prenom} {req.nom}", req.tel)
+
+        # Experte qui réalise la visite (jamais le compte technique qui crée l'événement)
+        experts, expert_user_id = {}, None
+        try:
+            experts = _load_experts(uid, models)
+            expert_user_id = _pick_expert(uid, models, experts, req)
+        except Exception as e:
+            logging.warning(f"Attribution experte: {e}")
+        expert_partner_id = experts[expert_user_id]["partner_id"] if expert_user_id else None
+        expert_vals = {"user_id": expert_user_id} if expert_user_id else {}
+        logging.info(f"submit_rdv: experte={experts.get(expert_user_id, {}).get('name', UNASSIGNED_EXPERT)}")
         adresse = req.rue + (f", {req.boite}" if req.boite else "") + f", {req.cp} {req.ville}"
 
         gestion = req.gestion_type or ""
@@ -369,9 +606,8 @@ def submit_rdv(req: SubmitRequest):
             # calendar.event aussi pour l'électrique seul (suivi dashboard + partenaires)
             event_id = None
             try:
-                expert_id = find_or_create_partner(ODOO_USER, EXPERT_NAME)
-                partner_ids = [expert_id]
-                if client_id and client_id != expert_id: partner_ids.append(client_id)
+                partner_ids = [client_id] if client_id else []
+                if expert_partner_id and expert_partner_id not in partner_ids: partner_ids.append(expert_partner_id)
                 if req.contact_place_email:
                     place_id = find_or_create_partner(req.contact_place_email, req.contact_place_nom or req.contact_place_email, req.contact_place_tel)
                     if place_id not in partner_ids: partner_ids.append(place_id)
@@ -381,7 +617,8 @@ def submit_rdv(req: SubmitRequest):
                     "start": req.start_utc, "stop": req.stop_utc,
                     "description": f"Creneau : {req.creneau_label}\nAdresse : {adresse}\n\n{x_infos}",
                     "partner_ids": [[6, 0, partner_ids]],
-                    "privacy": "confidential"
+                    "privacy": "confidential",
+                    **expert_vals,
                 }], {"context": {"no_mail_to_attendees": True}})
                 vals = {"x_studio_adresse_du_bien": adresse, "x_studio_informations_sur_le_bien": x_infos}
                 if invoice_id: vals["x_studio_facture_liee"] = invoice_id
@@ -393,13 +630,12 @@ def submit_rdv(req: SubmitRequest):
             return {"success": True, "event_id": event_id, "invoice_id": invoice_id}
 
         # ── PEB ou PACK : création du calendar.event ──
-        expert_id = find_or_create_partner(ODOO_USER, EXPERT_NAME)
         place_id = None
         if req.contact_place_email:
             place_id = find_or_create_partner(req.contact_place_email, req.contact_place_nom or req.contact_place_email, req.contact_place_tel)
 
-        partner_ids = [expert_id]
-        if client_id and client_id != expert_id: partner_ids.append(client_id)
+        partner_ids = [client_id] if client_id else []
+        if expert_partner_id and expert_partner_id not in partner_ids: partner_ids.append(expert_partner_id)
         if place_id and place_id not in partner_ids: partner_ids.append(place_id)
 
         express_prefix = "⚡ EXPRESS — " if is_express else ""
@@ -411,7 +647,8 @@ def submit_rdv(req: SubmitRequest):
             "start": req.start_utc, "stop": req.stop_utc,
             "description": f"Creneau : {req.creneau_label}\nAdresse : {adresse}\n\n{x_infos}",
             "partner_ids": [[6, 0, partner_ids]],
-            "privacy": "confidential"
+            "privacy": "confidential",
+            **expert_vals,
         }], {"context": {"no_mail_to_attendees": True}})
 
         try:
@@ -539,10 +776,16 @@ def partner_missions(req: PartnerMissionsRequest, x_berex_key: Optional[str] = H
             {"fields": ["id", "name", "start", "active", "x_studio_adresse_du_bien",
                         "x_studio_informations_sur_le_bien", "x_studio_statut_draft",
                         "x_studio_client_token", "x_studio_pdf_definitif",
-                        "x_studio_facture_liee"],
+                        "x_studio_facture_liee", "user_id", "partner_ids"],
              "order": "start desc", "limit": 1000,
              # bin_size : renvoie la taille du PDF au lieu du fichier entier
              "context": {"active_test": False, "bin_size": True}})
+
+        try:
+            experts = _load_experts(uid, models)
+        except Exception as e:
+            logging.warning(f"partner_missions expertes: {e}")
+            experts = {}
 
         # Factures liées (lecture groupée)
         inv_ids = list({ev["x_studio_facture_liee"][0] for ev in (events or [])
@@ -609,7 +852,7 @@ def partner_missions(req: PartnerMissionsRequest, x_berex_key: Optional[str] = H
                 "address": ev.get("x_studio_adresse_du_bien") or "",
                 "date_start": start,
                 "status": status,
-                "expert": EXPERT_NAME,
+                "expert": _expert_name(ev, experts),
                 "requester": requester,
                 "report_url": report_url,
                 "peb_status": peb_status,
@@ -921,13 +1164,14 @@ def get_chat(token: str):
               ["message_type", "in", ["comment", "email"]]]],
             {"fields": ["id", "author_id", "body", "date"], "order": "date asc", "limit": 100})
 
+        staff = _expert_partner_ids(uid, models) | {CHARLOTTE_PARTNER_ID}
         result = []
         for msg in (msgs or []):
             aid = msg.get("author_id")
             result.append({
                 "id":        msg["id"],
                 "author":    aid[1] if aid else "Inconnu",
-                "is_expert": bool(aid and aid[0] == CHARLOTTE_PARTNER_ID),
+                "is_expert": bool(aid and aid[0] in staff),
                 "body":      msg.get("body", ""),
                 "date":      msg.get("date", "")
             })
@@ -950,7 +1194,8 @@ def post_chat(token: str, req: ChatRequest):
         partner_ids = events[0].get("partner_ids", [])
 
         # Partenaire client = premier partenaire qui n'est pas Charlotte
-        client_partner_id = next((p for p in partner_ids if p != CHARLOTTE_PARTNER_ID), None)
+        staff = _expert_partner_ids(uid, models) | {CHARLOTTE_PARTNER_ID}
+        client_partner_id = next((p for p in partner_ids if p not in staff), None)
 
         kwargs = {"body": req.message, "message_type": "comment", "subtype_xmlid": "mail.mt_comment"}
         if client_partner_id:
