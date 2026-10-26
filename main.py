@@ -213,16 +213,18 @@ def _blocked_days(uid, models, day_from, day_to):
         if d1:
             off.setdefault(u, []).append((d1, d2))
 
+    # Même liste d'expertes que le dashboard (Charlotte et Emma)
+    logins = ["charlotte@pebpulse.be", "emma@pebpulse.be"]
+    users = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.users", "search_read",
+        [["&", ["share", "=", False], "|", "|", "|", ["login", "in", logins], ["email", "in", logins],
+          ["name", "ilike", "Charlotte"], ["name", "ilike", "Emma"]]],
+        {"fields": ["id"]})
     experts = {}
-    for k, c in (cfg or {}).items():
-        try:
-            if (c or {}).get("active", True) is not False:
-                experts[int(k)] = c or {}
-        except ValueError:
-            pass
-    if not experts:
-        # Pas de configuration : on considère les personnes qui ont des congés comme l'équipe
-        experts = {u: {} for u in off}
+    for u in users or []:
+        c = (cfg or {}).get(str(u["id"])) or {}
+        if c.get("active", True) is not False:
+            experts[u["id"]] = c
+    logging.info(f"blocked_days: expertes={list(experts)} conges={ {k: v for k, v in off.items()} }")
     if not experts:
         return []
 
