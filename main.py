@@ -149,6 +149,30 @@ class ChatRequest(BaseModel):
     message: str
 
 
+# ── PARTENAIRE (libellé lisible à partir de la source) ─────
+
+PARTNER_LABELS = [
+    ("PORTAIL BEREX",   "Portail Berex"),
+    ("LATOUR & PETIT",  "Latour & Petit"),
+    ("HERMANS",         "Hermans"),
+    ("FMIB",            "FMIB"),
+    ("BNP",             "BNP"),
+]
+
+
+def partner_label(source):
+    """'BNP - CertElec' -> 'BNP', 'LATOUR & PETIT' -> 'Latour & Petit', '' -> ''."""
+    src = (source or "").strip()
+    if not src:
+        return ""
+    src = re.sub(r"\s*-\s*CertElec\s*$", "", src, flags=re.IGNORECASE).strip()
+    up = src.upper()
+    for prefix, label in PARTNER_LABELS:
+        if up.startswith(prefix):
+            return label
+    return src
+
+
 # ── ENDPOINTS RDV ──────────────────────────────────────────
 
 @app.get("/")
@@ -220,6 +244,16 @@ def nearby_slots(req: NearbySlotsRequest):
     return {"ok": True, "client_found": True, "slots": slots}
 
 
+def _write_partenaire(models, uid, event_id, partenaire):
+    if not (event_id and partenaire):
+        return
+    try:
+        models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "write",
+            [[event_id], {"x_studio_partenaire": partenaire}])
+    except Exception as e:
+        logging.warning(f"x_studio_partenaire (champ a creer dans Odoo Studio ?): {e}")
+
+
 @app.post("/pebepc/rdv/submit")
 def submit_rdv(req: SubmitRequest):
     try:
@@ -262,6 +296,9 @@ def submit_rdv(req: SubmitRequest):
         elif is_elec_only:
             x_infos += "\n\nSERVICE : Certificat Electrique"
         source = (req.source or "").strip()
+        partenaire = partner_label(source)
+        partner_prefix = f"[{partenaire}] " if partenaire else ""
+        partner_tag = f" [{partenaire}]" if partenaire else ""
         if source:
             x_infos += f"\n\nSource : {source}"
 
@@ -290,7 +327,7 @@ def submit_rdv(req: SubmitRequest):
         # ── CERTIFICAT ELECTRIQUE SEUL : pas de calendar.event ──
         if is_elec_only:
             express_tag = " ⚡ EXPRESS" if is_express else ""
-            subject_expert = f"Nouvelle demande Certificat Electrique{express_tag} - {req.prenom} {req.nom}"
+            subject_expert = f"{partner_prefix}Nouvelle demande Certificat Electrique{express_tag} - {req.prenom} {req.nom}"
             body_expert = f"""<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
     <div style="background:linear-gradient(135deg,#F59E0B,#FBBF24);padding:24px 28px;border-radius:12px 12px 0 0;">
         <h1 style="color:#fff;font-size:1.2rem;margin:0;">Nouvelle demande : Certificat Electrique{express_tag}</h1>
@@ -340,7 +377,7 @@ def submit_rdv(req: SubmitRequest):
                     if place_id not in partner_ids: partner_ids.append(place_id)
                 express_prefix = "⚡ EXPRESS — " if is_express else ""
                 event_id = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "create", [{
-                    "name": f"{express_prefix}Certificat Electrique — {req.type_bien} {req.superficie} — {adresse}",
+                    "name": f"{partner_prefix}{express_prefix}Certificat Electrique — {req.type_bien} {req.superficie} — {adresse}",
                     "start": req.start_utc, "stop": req.stop_utc,
                     "description": f"Creneau : {req.creneau_label}\nAdresse : {adresse}\n\n{x_infos}",
                     "partner_ids": [[6, 0, partner_ids]],
@@ -349,6 +386,7 @@ def submit_rdv(req: SubmitRequest):
                 vals = {"x_studio_adresse_du_bien": adresse, "x_studio_informations_sur_le_bien": x_infos}
                 if invoice_id: vals["x_studio_facture_liee"] = invoice_id
                 models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "write", [[event_id], vals])
+                _write_partenaire(models, uid, event_id, partenaire)
             except Exception as e:
                 logging.warning(f"Event certificat electrique: {e}")
 
@@ -366,7 +404,7 @@ def submit_rdv(req: SubmitRequest):
 
         express_prefix = "⚡ EXPRESS — " if is_express else ""
         pack_suffix = " [PEB + Élec]" if is_pack else ""
-        event_name = f"{express_prefix}PEB{pack_suffix} — {req.type_bien} {req.superficie} — {adresse}"
+        event_name = f"{partner_prefix}{express_prefix}PEB{pack_suffix} — {req.type_bien} {req.superficie} — {adresse}"
 
         event_id = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "create", [{
             "name": event_name,
@@ -384,6 +422,8 @@ def submit_rdv(req: SubmitRequest):
         except Exception as e:
             logging.warning(f"Champs studio event: {e}")
 
+        _write_partenaire(models, uid, event_id, partenaire)
+
         if invoice_id:
             try:
                 models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "write", [[event_id], {"x_studio_facture_liee": invoice_id}])
@@ -393,7 +433,7 @@ def submit_rdv(req: SubmitRequest):
         # ── Mail notification Armine ──
         express_label = " ⚡ EXPRESS" if is_express else ""
         pack_label = " [PEB + Élec]" if is_pack else ""
-        subject_expert = f"Nouveau RDV PEB{pack_label}{express_label} - {req.prenom} {req.nom}"
+        subject_expert = f"{partner_prefix}Nouveau RDV PEB{pack_label}{express_label} - {req.prenom} {req.nom}"
         header_color = "#DC2626,#EF4444" if is_express else ("135,#1B3A8C,#3B82F6" if not is_pack else "135,#7C3AED,#A78BFA")
         body_expert = f"""<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
     <div style="background:linear-gradient(135deg,{'#DC2626,#EF4444' if is_express else ('#7C3AED,#A78BFA' if is_pack else '#1B3A8C,#3B82F6')});padding:24px 28px;border-radius:12px 12px 0 0;">
@@ -460,6 +500,24 @@ def _infos_value(label, text):
     return m.group(1).strip() if m else ""
 
 
+def _invoice_info(ev, invoices):
+    link = ev.get("x_studio_facture_liee")
+    inv = invoices.get(link[0]) if isinstance(link, (list, tuple)) and link else None
+    if not inv or inv.get("state") == "cancel":
+        return {"invoice_state": "none", "invoice_amount": 0.0, "invoice_url": ""}
+    paid = inv.get("payment_state") in ("paid", "in_payment")
+    url = ""
+    if inv.get("access_url"):
+        url = f"{SITE_URL}{inv['access_url']}"
+        if inv.get("access_token"):
+            url += f"?access_token={inv['access_token']}"
+    return {
+        "invoice_state": "paid" if paid else "unpaid",
+        "invoice_amount": float(inv.get("amount_residual") or 0.0),
+        "invoice_url": url,
+    }
+
+
 @app.post("/pebepc/partner/missions")
 def partner_missions(req: PartnerMissionsRequest, x_berex_key: Optional[str] = Header(default=None, alias="X-Berex-Key")):
     expected = (os.getenv("BEREX_PARTNER_KEY") or "").strip().strip('"').strip("'")
@@ -480,9 +538,32 @@ def partner_missions(req: PartnerMissionsRequest, x_berex_key: Optional[str] = H
               "|", ["active", "=", True], ["active", "=", False]]],
             {"fields": ["id", "name", "start", "active", "x_studio_adresse_du_bien",
                         "x_studio_informations_sur_le_bien", "x_studio_statut_draft",
-                        "x_studio_client_token"],
+                        "x_studio_client_token", "x_studio_pdf_definitif",
+                        "x_studio_facture_liee"],
              "order": "start desc", "limit": 1000,
-             "context": {"active_test": False}})
+             # bin_size : renvoie la taille du PDF au lieu du fichier entier
+             "context": {"active_test": False, "bin_size": True}})
+
+        # Factures liées (lecture groupée)
+        inv_ids = list({ev["x_studio_facture_liee"][0] for ev in (events or [])
+                        if isinstance(ev.get("x_studio_facture_liee"), (list, tuple)) and ev["x_studio_facture_liee"]})
+        invoices = {}
+        if inv_ids:
+            try:
+                for inv in models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "account.move", "read", [inv_ids],
+                        {"fields": ["id", "state", "payment_state", "amount_residual", "access_url", "access_token"]}):
+                    if not inv.get("access_token"):
+                        # jeton portail manquant : on le crée pour avoir un lien valide
+                        tok = secrets.token_urlsafe(24)
+                        try:
+                            models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "account.move", "write",
+                                [[inv["id"]], {"access_token": tok}])
+                            inv["access_token"] = tok
+                        except Exception as e:
+                            logging.warning(f"access_token facture {inv['id']}: {e}")
+                    invoices[inv["id"]] = inv
+            except Exception as e:
+                logging.warning(f"partner_missions factures: {e}")
 
         missions = []
         for ev in (events or []):
@@ -505,11 +586,15 @@ def partner_missions(req: PartnerMissionsRequest, x_berex_key: Optional[str] = H
             start = ev.get("start") or ""
             token = ev.get("x_studio_client_token") or ""
             report_url = ""
+            peb_status = ev.get("x_studio_statut_draft") or ""
+            if not isinstance(peb_status, str):
+                peb_status = ""
             if not ev.get("active", True):
                 status = "cancelled"
-            elif str(ev.get("x_studio_statut_draft") or "") == "closed" and token:
+            elif peb_status == "closed":
                 status = "report"
-                report_url = f"{RAILWAY_URL}/pebepc/mission/{token}/pdf/final"
+                if token:
+                    report_url = f"{RAILWAY_URL}/pebepc/mission/{token}/pdf/final"
             else:
                 try:
                     future = datetime.strptime(start, "%Y-%m-%d %H:%M:%S") > now
@@ -527,6 +612,10 @@ def partner_missions(req: PartnerMissionsRequest, x_berex_key: Optional[str] = H
                 "expert": EXPERT_NAME,
                 "requester": requester,
                 "report_url": report_url,
+                "peb_status": peb_status,
+                "client_token": token,
+                "has_final_pdf": bool(ev.get("x_studio_pdf_definitif")),
+                **_invoice_info(ev, invoices),
             })
             if len(missions) >= 300:
                 break
