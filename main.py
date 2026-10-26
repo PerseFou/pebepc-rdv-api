@@ -180,114 +180,21 @@ def root():
     return {"status": "ok", "service": "pebepc-rdv-api"}
 
 
-# ── CONGÉS DES EXPERTES (événements "INDISPO — …" créés par le dashboard) ──
-
-EXPERTS_CONFIG_KEY = "peb_pulse.experts_config"
-
-
-def _blocked_days(uid, models, day_from, day_to):
-    """Jours (AAAA-MM-JJ) entre day_from et day_to où AUCUNE experte active n'est disponible
-    (congé INDISPO, experte désactivée, ou hors de ses dates de début/fin)."""
-    import json
-    from datetime import date as _date
-    cfg = {}
-    try:
-        rows = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "ir.config_parameter", "search_read",
-            [[["key", "=", EXPERTS_CONFIG_KEY]]], {"fields": ["value"], "limit": 1})
-        if rows and rows[0].get("value"):
-            cfg = json.loads(rows[0]["value"])
-    except Exception as e:
-        logging.error(f"experts_config illisible: {e}")
-
-    leaves = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "search_read",
-        [[["name", "=ilike", "INDISPO%"], ["active", "=", True],
-          ["start", "<=", day_to + " 23:59:59"], ["stop", ">=", day_from + " 00:00:00"]]],
-        {"fields": ["user_id", "allday", "start_date", "stop_date", "start", "stop"], "limit": 1000})
-    off = {}
-    for ev in leaves or []:
-        if not ev.get("user_id"):
-            continue
-        u = ev["user_id"][0]
-        d1 = (ev.get("start_date") if ev.get("allday") else None) or (ev.get("start") or "")[:10]
-        d2 = (ev.get("stop_date") if ev.get("allday") else None) or (ev.get("stop") or "")[:10] or d1
-        if d1:
-            off.setdefault(u, []).append((d1, d2))
-
-    # Même liste d'expertes que le dashboard (Charlotte et Emma)
-    logins = ["charlotte@pebpulse.be", "emma@pebpulse.be"]
-    users = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.users", "search_read",
-        [["&", ["share", "=", False], "|", "|", "|", ["login", "in", logins], ["email", "in", logins],
-          ["name", "ilike", "Charlotte"], ["name", "ilike", "Emma"]]],
-        {"fields": ["id"]})
-    experts = {}
-    for u in users or []:
-        c = (cfg or {}).get(str(u["id"])) or {}
-        if c.get("active", True) is not False:
-            experts[u["id"]] = c
-    logging.info(f"blocked_days: expertes={list(experts)} conges={ {k: v for k, v in off.items()} }")
-    if not experts:
-        return []
-
-    def dispo(u, c, k):
-        if c.get("start") and k < c["start"]:
-            return False
-        if c.get("end") and k > c["end"]:
-            return False
-        return not any(a <= k <= b for a, b in off.get(u, []))
-
-    out = []
-    d = _date.fromisoformat(day_from)
-    end = _date.fromisoformat(day_to)
-    while d <= end:
-        k = d.isoformat()
-        if not any(dispo(u, c, k) for u, c in experts.items()):
-            out.append(k)
-        d += timedelta(days=1)
-    return out
-
-
 @app.post("/pebepc/rdv/taken_slots")
 def taken_slots(req: TakenSlotsRequest):
     try:
         uid, models = odoo_connect()
-        # Chevauchement avec la période demandée (et plus "contenu dans") : un événement
-        # qui déborde de la semaine doit quand même bloquer ses créneaux.
         events = models.execute_kw(
             ODOO_DB, uid, ODOO_PASSWORD,
             "calendar.event", "search_read",
-            [[["start", "<", req.stop], ["stop", ">", req.start], ["active", "=", True],
-              ["name", "not ilike", "INDISPO"]]],
+            [[["start", ">=", req.start], ["stop", "<=", req.stop], ["active", "=", True]]],
             {"fields": ["start", "stop"], "limit": 500}
         )
-        slots = [{"start": e["start"], "stop": e["stop"], "expertEmail": ODOO_USER} for e in (events or [])]
-        # Congés : jour bloqué seulement si plus aucune experte n'est disponible
-        try:
-            for k in _blocked_days(uid, models, req.start[:10], req.stop[:10]):
-                # Un créneau de 30 min toutes les 30 min : la page grise créneau par créneau
-                for m in range(0, 24 * 60, 30):
-                    t1 = f"{k} {m // 60:02d}:{m % 60:02d}:00"
-                    m2 = m + 30
-                    t2 = f"{k} {m2 // 60:02d}:{m2 % 60:02d}:00" if m2 < 1440 else f"{k} 23:59:59"
-                    slots.append({"start": t1, "stop": t2, "expertEmail": ODOO_USER, "indispo": True})
-        except Exception as e:
-            logging.error(f"taken_slots conges error: {e}")
-        logging.info(f"taken_slots: {len(slots)} creneaux bloques")
-        return {"slots": slots}
+        logging.info(f"taken_slots: {len(events)} evenements trouves")
+        return {"slots": [{"start": e["start"], "stop": e["stop"], "expertEmail": ODOO_USER} for e in (events or [])]}
     except Exception as e:
         logging.error(f"taken_slots error: {e}")
         return {"slots": []}
-
-
-@app.get("/pebepc/rdv/unavailable_days")
-def unavailable_days(days: int = 120):
-    """Contrôle : jours où aucune experte n'est disponible."""
-    try:
-        uid, models = odoo_connect()
-        today = datetime.now().date()
-        return {"days": _blocked_days(uid, models, today.isoformat(), (today + timedelta(days=days)).isoformat())}
-    except Exception as e:
-        logging.error(f"unavailable_days error: {e}")
-        return {"days": [], "error": str(e)}
 
 
 @app.post("/pebepc/rdv/nearby_slots")
