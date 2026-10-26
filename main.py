@@ -462,7 +462,10 @@ def _infos_value(label, text):
 
 @app.post("/pebepc/partner/missions")
 def partner_missions(req: PartnerMissionsRequest, x_berex_key: Optional[str] = Header(default=None, alias="X-Berex-Key")):
-    if not BEREX_PARTNER_KEY or not x_berex_key or not secrets.compare_digest(x_berex_key, BEREX_PARTNER_KEY):
+    expected = (os.getenv("BEREX_PARTNER_KEY") or "").strip().strip('"').strip("'")
+    given = (x_berex_key or "").strip()
+    if not expected or not given or not secrets.compare_digest(given, expected):
+        logging.warning(f"partner_missions 401: env_set={bool(expected)} env_len={len(expected)} header_len={len(given)}")
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     src = (req.source or "").strip()
     if not src:
