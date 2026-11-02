@@ -526,6 +526,11 @@ def submit_rdv(req: SubmitRequest):
         if req.contact_place_email: x_infos += f"Email : {req.contact_place_email}\n"
         x_infos += f"\nBIEN\nType : {req.type_bien}\nSuperficie : {req.superficie}"
         x_infos += f"\n\nMANDATAIRE\nNom : {req.prenom} {req.nom}\nTel : {req.tel}\nEmail : {req.email}"
+        if req.fact_email or req.fact_nom or req.fact_tva:
+            x_infos += "\n\nFACTURATION"
+            if req.fact_nom:   x_infos += f"\nNom : {req.fact_nom}"
+            if req.fact_email: x_infos += f"\nEmail : {req.fact_email}"
+            if req.fact_tva:   x_infos += f"\nTVA : {req.fact_tva}"
         if is_express:
             x_infos += "\n\nEXPRESS : Oui"
         if is_pack:
@@ -732,6 +737,27 @@ class PartnerMissionsRequest(BaseModel):
     source: str
 
 
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
+
+def _infos_emails(infos):
+    """E-mail du demandeur (bloc MANDATAIRE) et toutes les adresses des infos du RDV, en minuscules, sans doublon."""
+    infos = infos or ""
+    mand = infos.split("MANDATAIRE")
+    req_email = ""
+    if len(mand) > 1:
+        m = EMAIL_RE.search(_infos_value("Email", mand[1].split("\n\n")[0] if "\n\n" in mand[1] else mand[1]))
+        req_email = m.group(0).lower() if m else ""
+    emails = []
+    for e in EMAIL_RE.findall(infos):
+        e = e.lower()
+        if e not in emails:
+            emails.append(e)
+    if req_email:  # le demandeur en premier
+        emails = [req_email] + [e for e in emails if e != req_email]
+    return req_email, emails
+
+
 def _infos_value(label, text):
     m = re.search(rf"{label}\s*:\s*(.+)", text or "")
     return m.group(1).strip() if m else ""
@@ -825,6 +851,7 @@ def partner_missions(req: PartnerMissionsRequest, x_berex_key: Optional[str] = H
 
             mand = infos.split("MANDATAIRE")
             requester = _infos_value("Nom", mand[1]) if len(mand) > 1 else ""
+            req_email, emails = _infos_emails(infos)
 
             start = ev.get("start") or ""
             token = ev.get("x_studio_client_token") or ""
@@ -854,6 +881,8 @@ def partner_missions(req: PartnerMissionsRequest, x_berex_key: Optional[str] = H
                 "status": status,
                 "expert": _expert_name(ev, experts),
                 "requester": requester,
+                "requester_email": req_email,
+                "emails": emails,
                 "report_url": report_url,
                 "peb_status": peb_status,
                 "client_token": token,
