@@ -55,7 +55,8 @@ class PartnerAwareCORS(CORSMiddleware):
 
 app.add_middleware(
     PartnerAwareCORS,
-    allow_origins=["*"],
+    # "*" autorise déjà toutes les origines ; les sites partenaires sont listés pour le jour où on restreint
+    allow_origins=["*", "https://berex-barnes.odoo.com"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -159,6 +160,7 @@ PARTNER_LABELS = [
     ("HERMANS",         "Hermans"),
     ("FMIB",            "FMIB"),
     ("BNP",             "BNP"),
+    ("BARNES",          "Barnes"),
 ]
 
 
