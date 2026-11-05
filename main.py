@@ -100,6 +100,11 @@ def send_odoo_mail(uid, models, email_to, subject, body_html):
 class TakenSlotsRequest(BaseModel):
     start: str
     stop: str
+    # Filtre experte (facultatif) : région du bien ("bruxelles", "wallonie", "flandre") ou code postal,
+    # type de bien. Sans ces champs, comportement d'avant (tous les RDV bloquent).
+    region: Optional[str] = ""
+    cp: Optional[str] = ""
+    type_bien: Optional[str] = ""
 
 
 class NearbySlotsRequest(BaseModel):
@@ -108,6 +113,8 @@ class NearbySlotsRequest(BaseModel):
     rue: str
     cp: Optional[str] = ""
     ville: Optional[str] = ""
+    region: Optional[str] = ""
+    type_bien: Optional[str] = ""
 
 
 class SubmitRequest(BaseModel):
@@ -337,7 +344,7 @@ def _pick_expert(uid, models, experts, req):
         regions = [str(r).lower() for r in (c.get("regions") or [])]
         if regions and region and region not in regions:
             continue
-        types = [str(t).lower() for t in (c.get("types") or [])]
+        types = [str(t).lower() for t in (c.get("biens") or c.get("types") or [])]
         if types and type_bien and not any(t in type_bien for t in types):
             continue
         prio = c.get("priority", c.get("priorite", 99))
@@ -381,8 +388,113 @@ def _expert_partner_ids(uid, models):
         return set()
 
 
+# ── CRÉNEAUX SELON LA RÉGION : seules les expertes qui couvrent la région comptent ──
+
+_REGION_ALIASES = {"bruxelles": "bruxelles", "brussels": "bruxelles", "bxl": "bruxelles",
+                   "wallonie": "wallonie", "flandre": "flandre", "flandres": "flandre", "vlaanderen": "flandre"}
+
+
+def _norm_region(region, cp=""):
+    r = (region or "").strip().lower()
+    for k, v in _REGION_ALIASES.items():
+        if k in r:
+            return v
+    return _region_from_cp(cp) if (cp or "").strip() else ""
+
+
+def _compatible_experts(experts, region, type_bien):
+    """Expertes actives qui couvrent la région et acceptent le type de bien."""
+    tb = (type_bien or "").lower()
+    out = {}
+    for u_id, e in experts.items():
+        c = e["cfg"]
+        if c.get("active", True) is False:
+            continue
+        regions = [str(r).lower() for r in (c.get("regions") or [])]
+        if region and "regions" in c and region not in regions:
+            continue
+        biens = [str(b).lower() for b in (c.get("biens") or [])]
+        if tb and biens and not any(b in tb for b in biens):
+            continue
+        out[u_id] = e
+    return out
+
+
+def _slots_for_region(uid, models, start, stop, region, type_bien):
+    """Plages où AUCUNE experte compatible n'est libre (RDV, congé ou hors de ses dates).
+    Un RDV sans experte attribuée bloque tout le monde (prudence)."""
+    from datetime import date as _date
+    experts = _load_experts(uid, models)
+    comp = _compatible_experts(experts, region, type_bien)
+    day_from, day_to = start[:10], stop[:10]
+
+    def full_day(k):
+        return (k + " 00:00:00", k + " 23:59:59")
+
+    days = []
+    d = _date.fromisoformat(day_from)
+    while d <= _date.fromisoformat(day_to):
+        days.append(d.isoformat()); d += timedelta(days=1)
+
+    if not comp:
+        logging.info(f"taken_slots: aucune experte pour region={region} bien={type_bien}")
+        return [full_day(k) for k in days]
+
+    events = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "search_read",
+        [[["start", "<", stop], ["stop", ">", start], ["active", "=", True]]],
+        {"fields": ["name", "start", "stop", "user_id", "partner_ids", "allday", "start_date", "stop_date"], "limit": 1000}) or []
+    partner_of = {e["partner_id"]: u for u, e in experts.items() if e["partner_id"]}
+
+    busy = {u: [] for u in comp}
+    for ev in events:
+        name = (ev.get("name") or "").upper()
+        u = ev.get("user_id")
+        u = u[0] if isinstance(u, (list, tuple)) and u else None
+        owners = set()
+        if u in experts:
+            owners.add(u)
+        owners |= {partner_of[p] for p in (ev.get("partner_ids") or []) if p in partner_of}
+        if name.startswith("INDISPO"):
+            d1 = (ev.get("start_date") if ev.get("allday") else None) or (ev.get("start") or "")[:10]
+            d2 = (ev.get("stop_date") if ev.get("allday") else None) or (ev.get("stop") or "")[:10] or d1
+            iv = (d1 + " 00:00:00", d2 + " 23:59:59")
+            targets = owners
+        else:
+            iv = (ev["start"], ev["stop"])
+            targets = owners if owners else set(comp)  # RDV non attribué : bloque tout le monde
+        for t in targets:
+            if t in busy:
+                busy[t].append(iv)
+    for u_id, e in comp.items():
+        c = e["cfg"]
+        for k in days:
+            if (c.get("start") and k < c["start"]) or (c.get("end") and k > c["end"]):
+                busy[u_id].append(full_day(k))
+
+    # Intersection : plage bloquée si toutes les expertes compatibles sont occupées
+    pts = sorted({p for ivs in busy.values() for iv in ivs for p in iv})
+    out = []
+    for a, b in zip(pts, pts[1:]):
+        if all(any(s0 <= a and b <= s1 for s0, s1 in busy[u]) for u in comp):
+            if out and out[-1][1] == a:
+                out[-1] = (out[-1][0], b)
+            else:
+                out.append((a, b))
+    logging.info(f"taken_slots region={region} bien={type_bien}: expertes={[e['name'] for e in comp.values()]} bloques={len(out)}")
+    return out
+
+
 @app.post("/pebepc/rdv/taken_slots")
 def taken_slots(req: TakenSlotsRequest):
+    region = _norm_region(req.region, req.cp)
+    if region:
+        try:
+            uid, models = odoo_connect()
+            return {"region": region, "slots": [{"start": a, "stop": b, "expertEmail": ODOO_USER}
+                    for a, b in _slots_for_region(uid, models, req.start, req.stop, region, req.type_bien)]}
+        except Exception as e:
+            logging.error(f"taken_slots region error: {e}")
+            # repli : comportement habituel ci-dessous
     try:
         uid, models = odoo_connect()
         # Chevauchement avec la période demandée (et plus "contenu dans") : un événement
@@ -440,8 +552,26 @@ def nearby_slots(req: NearbySlotsRequest):
             ODOO_DB, uid, ODOO_PASSWORD,
             "calendar.event", "search_read",
             [[["start", ">=", req.start], ["stop", "<=", req.stop], ["active", "=", True]]],
-            {"fields": ["start", "stop", "name", "location", "x_studio_adresse_du_bien"], "limit": 500}
+            {"fields": ["start", "stop", "name", "location", "x_studio_adresse_du_bien", "user_id", "partner_ids"], "limit": 500}
         ) or []
+        region = _norm_region(req.region, req.cp)
+        if region:
+            try:
+                experts = _load_experts(uid, models)
+                comp = _compatible_experts(experts, region, req.type_bien)
+                cpids = {e["partner_id"] for e in comp.values() if e["partner_id"]}
+                apids = {e["partner_id"] for e in experts.values() if e["partner_id"]}
+
+                def garde(ev):
+                    u = ev.get("user_id")
+                    u = u[0] if isinstance(u, (list, tuple)) and u else None
+                    pids = set(ev.get("partner_ids") or [])
+                    if u in comp or pids & cpids:
+                        return True
+                    return not (u in experts or pids & apids)  # non attribué : garde
+                events = [ev for ev in events if garde(ev)]
+            except Exception as e:
+                logging.warning(f"nearby_slots filtre region: {e}")
     except Exception as e:
         logging.error(f"nearby_slots odoo: {e}")
         return {"ok": False, "client_found": False, "slots": []}
