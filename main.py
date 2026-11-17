@@ -149,6 +149,13 @@ class SubmitRequest(BaseModel):
     source: Optional[str] = ""
     # expert_id: experte choisie par le formulaire (id res.users ou res.partner de Charlotte/Emma)
     expert_id: Optional[int] = None
+    # Personne sur place, clé à aller chercher, commentaire du client (affichés dans le dashboard)
+    sur_place_prenom: Optional[str] = ""
+    sur_place_nom: Optional[str] = ""
+    sur_place_tel: Optional[str] = ""
+    cle: Optional[bool] = False
+    cle_adresse: Optional[str] = ""
+    infos_supp: Optional[str] = ""
 
 
 class RefuseRequest(BaseModel):
@@ -612,6 +619,42 @@ def _write_partenaire(models, uid, event_id, partenaire):
         logging.warning(f"x_studio_partenaire (champ a creer dans Odoo Studio ?): {e}")
 
 
+def _write_sur_place(models, uid, event_id, req):
+    """Champs Studio du dashboard : personne sur place, clé, note interne (commentaire du client)."""
+    if not event_id:
+        return
+    vals = {
+        "x_studio_sur_place_prenom": (req.sur_place_prenom or "").strip() or False,
+        "x_studio_sur_place_nom":    (req.sur_place_nom or "").strip() or False,
+        "x_studio_sur_place_tel":    (req.sur_place_tel or "").strip() or False,
+        "x_studio_cle":              bool(req.cle),
+        "x_studio_cle_adresse":      (req.cle_adresse or "").strip() or False,
+    }
+    if (req.infos_supp or "").strip():
+        vals["x_studio_note_interne"] = "Commentaire du client : " + req.infos_supp.strip()
+    try:
+        models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "write", [[event_id], vals])
+    except Exception as e:
+        logging.warning(f"Champs sur place / cle / note interne (a creer dans Odoo Studio ?): {e}")
+
+
+def _sur_place_html(req):
+    """Bloc ajouté à l'e-mail interne : personne sur place, clé, commentaire du client."""
+    import html as _h
+    rows = []
+    sp = " ".join(x for x in [(req.sur_place_prenom or "").strip(), (req.sur_place_nom or "").strip()] if x)
+    if sp or req.sur_place_tel:
+        rows.append(f"<b>Personne sur place :</b> {_h.escape(sp or '—')}" + (f" — {_h.escape(req.sur_place_tel)}" if req.sur_place_tel else ""))
+    if req.cle:
+        rows.append(f"<b>🔑 Clé à aller chercher :</b> {_h.escape(req.cle_adresse or 'adresse non précisée')}")
+    if (req.infos_supp or "").strip():
+        rows.append(f"<b>Commentaire du client :</b> {_h.escape(req.infos_supp.strip())}")
+    if not rows:
+        return ""
+    return ('<div style="background:#f3e8ff;border:1px solid #c4b5fd;padding:12px;border-radius:8px;margin-top:8px;color:#4c1d95;line-height:1.6;">'
+            + "<br/>".join(rows) + "</div>")
+
+
 @app.post("/pebepc/rdv/submit")
 def submit_rdv(req: SubmitRequest):
     try:
@@ -656,6 +699,12 @@ def submit_rdv(req: SubmitRequest):
         if req.contact_place_nom:   x_infos += f"Nom : {req.contact_place_nom}\n"
         if req.contact_place_tel:   x_infos += f"Tel : {req.contact_place_tel}\n"
         if req.contact_place_email: x_infos += f"Email : {req.contact_place_email}\n"
+        if req.sur_place_prenom or req.sur_place_nom or req.sur_place_tel:
+            x_infos += f"\nPERSONNE SUR PLACE\nPrénom : {req.sur_place_prenom or ''}\nNom : {req.sur_place_nom or ''}\nTél : {req.sur_place_tel or ''}\n"
+        if req.cle:
+            x_infos += f"\nClé à aller chercher : Oui\nAdresse de la clé : {req.cle_adresse or ''}\n"
+        if (req.infos_supp or "").strip():
+            x_infos += f"\nCOMMENTAIRE CLIENT\n{req.infos_supp.strip()}\n"
         x_infos += f"\nBIEN\nType : {req.type_bien}\nSuperficie : {req.superficie}"
         x_infos += f"\n\nMANDATAIRE\nNom : {req.prenom} {req.nom}\nTel : {req.tel}\nEmail : {req.email}"
         if req.fact_email or req.fact_nom or req.fact_tva:
@@ -719,6 +768,7 @@ def submit_rdv(req: SubmitRequest):
             {f'<tr style="background:#fff8e7;"><td style="padding:8px;color:#92610a;font-size:0.82rem;font-weight:800;text-transform:uppercase;">Facturation</td><td style="padding:8px;color:#92610a;font-weight:700;">{req.fact_nom or req.prenom+" "+req.nom} — TVA: {req.fact_tva or "/"}</td></tr>' if req.fact_tva else ''}
         </table>
         {f'<div style="background:#fff8e7;padding:12px;border-radius:8px;margin-top:8px;"><b style="color:#92610a;">Contact sur place :</b> {req.contact_place_nom} — {req.contact_place_tel} — {req.contact_place_email}</div>' if req.contact_place_email else ''}
+        {_sur_place_html(req)}
     </div>
 </div>"""
             send_odoo_mail(uid, models, ODOO_USER, subject_expert, body_expert)
@@ -761,6 +811,7 @@ def submit_rdv(req: SubmitRequest):
                 if invoice_id: vals["x_studio_facture_liee"] = invoice_id
                 models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "write", [[event_id], vals])
                 _write_partenaire(models, uid, event_id, partenaire)
+                _write_sur_place(models, uid, event_id, req)
             except Exception as e:
                 logging.warning(f"Event certificat electrique: {e}")
 
@@ -797,6 +848,7 @@ def submit_rdv(req: SubmitRequest):
             logging.warning(f"Champs studio event: {e}")
 
         _write_partenaire(models, uid, event_id, partenaire)
+        _write_sur_place(models, uid, event_id, req)
 
         if invoice_id:
             try:
@@ -823,6 +875,7 @@ def submit_rdv(req: SubmitRequest):
             <tr style="background:#f4f6fb;"><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Tel</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.tel}</td></tr>
             <tr><td style="padding:8px;color:#8a9bb5;font-size:0.82rem;font-weight:700;text-transform:uppercase;">Email</td><td style="padding:8px;color:#1B3A8C;font-weight:700;">{req.email}</td></tr>
         </table>
+        {_sur_place_html(req)}
         <div style="text-align:center;margin:20px 0;">
             <a href="{SITE_URL}/peb-dashboard" style="background:#1B3A8C;color:#fff;padding:12px 28px;border-radius:999px;text-decoration:none;font-weight:bold;">Voir le dashboard</a>
         </div>
