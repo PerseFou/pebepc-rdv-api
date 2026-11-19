@@ -499,14 +499,53 @@ def taken_slots(req: TakenSlotsRequest):
         uid, models = odoo_connect()
         # Chevauchement avec la période demandée (et plus "contenu dans") : un événement
         # qui déborde de la semaine doit quand même bloquer ses créneaux.
+        # Expertes + experte de chaque RDV / congé : la page décide elle-même, créneau par créneau,
+        # s'il reste une experte compatible (région, bien, service, dates) et libre.
+        try:
+            experts = _load_experts(uid, models)
+        except Exception as e:
+            logging.error(f"taken_slots experts: {e}")
+            experts = {}
+        partner_of = {e["partner_id"]: u for u, e in experts.items() if e["partner_id"]}
+
+        def owner(ev):
+            u = ev.get("user_id")
+            u = u[0] if isinstance(u, (list, tuple)) and u else None
+            if u in experts:
+                return u
+            for p in ev.get("partner_ids") or []:
+                if p in partner_of:
+                    return partner_of[p]
+            return None  # non attribué : bloque toutes les expertes
+
         events = models.execute_kw(
             ODOO_DB, uid, ODOO_PASSWORD,
             "calendar.event", "search_read",
-            [[["start", "<", req.stop], ["stop", ">", req.start], ["active", "=", True],
-              ["name", "not ilike", "INDISPO"]]],
-            {"fields": ["start", "stop"], "limit": 500}
-        )
-        slots = [{"start": e["start"], "stop": e["stop"], "expertEmail": ODOO_USER} for e in (events or [])]
+            [[["start", "<", req.stop], ["stop", ">", req.start], ["active", "=", True]]],
+            {"fields": ["name", "start", "stop", "user_id", "partner_ids", "allday", "start_date", "stop_date"], "limit": 1000}
+        ) or []
+        slots = []
+        for ev in events:
+            if (ev.get("name") or "").upper().startswith("INDISPO"):
+                o = owner(ev)
+                if o is None:
+                    continue
+                d1 = (ev.get("start_date") if ev.get("allday") else None) or (ev.get("start") or "")[:10]
+                d2 = (ev.get("stop_date") if ev.get("allday") else None) or (ev.get("stop") or "")[:10] or d1
+                slots.append({"start": d1 + " 00:00:00", "stop": d2 + " 23:59:59", "expertEmail": ODOO_USER,
+                              "expert_id": o, "indispo": True})
+            else:
+                slots.append({"start": ev["start"], "stop": ev["stop"], "expertEmail": ODOO_USER, "expert_id": owner(ev)})
+        if experts:
+            liste = []
+            for u, e in experts.items():
+                c = e["cfg"]
+                liste.append({"id": u, "name": e["name"], "active": c.get("active", True) is not False,
+                              "services": c.get("services") or [], "biens": c.get("biens") or [],
+                              "regions": c.get("regions") or [], "start": c.get("start") or "",
+                              "end": c.get("end") or "", "priority": c.get("priority") or 99})
+            logging.info(f"taken_slots: {len(slots)} RDV/conges, expertes={[x['name'] for x in liste]}")
+            return {"slots": slots, "experts": liste}
         # Congés : jour bloqué seulement si plus aucune experte n'est disponible
         try:
             for k in _blocked_days(uid, models, req.start[:10], req.stop[:10]):
