@@ -721,6 +721,67 @@ def submit_rdv(req: SubmitRequest):
 
         client_id = find_or_create_partner(req.email, f"{req.prenom} {req.nom}", req.tel)
 
+        # ── Client de la facture ──
+        # Particulier : une PERSONNE au nom indiqué (jamais la société qui partage la même adresse e-mail).
+        # Société : la société (recherche par n° TVA, puis par nom), créée si besoin.
+        def _norm(x):
+            return " ".join(str(x or "").lower().split())
+
+        def find_or_create_person(email, name, phone="", street=""):
+            email = (email or "").strip()
+            cands = []
+            if email:
+                cands = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.partner", "search_read",
+                    [[["email", "=ilike", email], ["is_company", "=", False]]],
+                    {"fields": ["id", "name", "phone", "street"], "order": "id asc", "limit": 50})
+            pick = next((c for c in cands if _norm(c.get("name")) == _norm(name)), None)
+            if pick:
+                upd = {}
+                if phone and not pick.get("phone"): upd["phone"] = phone
+                if street and not pick.get("street"): upd["street"] = street
+                if upd:
+                    models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.partner", "write", [[pick["id"]], upd])
+                return pick["id"]
+            vals = {"name": name or email, "is_company": False, "phone": phone or False, "street": street or False}
+            if email: vals["email"] = email.lower()
+            return models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.partner", "create", [vals])
+
+        def find_or_create_company(name, vat, email="", street=""):
+            vat_n = (vat or "").replace(" ", "").replace(".", "").upper()
+            found = []
+            if vat_n:
+                found = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.partner", "search_read",
+                    [[["vat", "=ilike", vat_n], ["is_company", "=", True]]], {"fields": ["id"], "limit": 1})
+            if not found and name:
+                found = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.partner", "search_read",
+                    [[["name", "=ilike", name.strip()], ["is_company", "=", True]]], {"fields": ["id"], "limit": 1})
+            if found:
+                return found[0]["id"]
+            vals = {"name": name or email, "is_company": True, "email": (email or "").lower() or False, "street": street or False}
+            try:
+                return models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.partner", "create", [dict(vals, vat=vat_n or False)])
+            except Exception as e:
+                # N° TVA refusé par le contrôle Odoo : société créée sans TVA, le numéro est gardé en note
+                logging.warning(f"TVA refusee ({vat_n}): {e}")
+                return models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "res.partner", "create",
+                    [dict(vals, comment=f"TVA indiquée : {vat}")])
+
+        # Demandeur (participant du RDV) : lui aussi une personne, pas la société qui partage son e-mail
+        try:
+            client_id = find_or_create_person(req.email, f"{req.prenom} {req.nom}", req.tel)
+        except Exception as e:
+            logging.warning(f"Demandeur: {e}")
+
+        invoice_partner_id = client_id
+        try:
+            if (req.fact_type or "").lower().startswith("soci"):
+                invoice_partner_id = find_or_create_company(req.fact_nom, req.fact_tva, req.fact_email or req.email, req.fact_addr)
+            else:
+                invoice_partner_id = find_or_create_person(req.fact_email or req.email,
+                    (req.fact_nom or f"{req.prenom} {req.nom}").strip(), req.tel, req.fact_addr)
+        except Exception as e:
+            logging.warning(f"Client facture: {e}")
+
         # Experte qui réalise la visite (jamais le compte technique qui crée l'événement)
         experts, expert_user_id = {}, None
         try:
@@ -780,7 +841,7 @@ def submit_rdv(req: SubmitRequest):
                     express_tag = "EXPRESS " if is_express else ""
                     inv_label = f"Certification PEB {express_tag}— {req.type_bien} {req.superficie} — {adresse}"
                 invoice_id = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "account.move", "create", [{
-                    "move_type": "out_invoice", "partner_id": client_id,
+                    "move_type": "out_invoice", "partner_id": invoice_partner_id,
                     "invoice_line_ids": [[0, 0, {"name": inv_label, "quantity": 1, "price_unit": htva, "tax_ids": tax_ids}]]
                 }])
             except Exception as e:
