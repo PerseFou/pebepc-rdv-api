@@ -1187,11 +1187,15 @@ def partner_missions(req: PartnerMissionsRequest, x_berex_key: Optional[str] = H
 @app.post("/pebepc/dashboard/send_draft")
 async def send_draft(
     event_id: int = Form(...),
-    pdf: UploadFile = File(...)
+    pdf: UploadFile = File(...),
+    unit: int = Form(0),            # n° du bien / de l'appartement (0 = mission entière)
+    unit_label: str = Form("")      # ex. « Bien 2 (Maison < 180 m²) » ou « Appartement 3 »
 ):
     try:
         uid, models = odoo_connect()
-        token = secrets.token_urlsafe(24)
+        # Lien client stable : on garde le token existant, pour que les liens des autres biens restent valables
+        cur = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "read", [[event_id]], {"fields": ["x_studio_client_token"]})
+        token = (cur[0].get("x_studio_client_token") if cur else "") or secrets.token_urlsafe(24)
         logging.info(f"send_draft: event_id={event_id}, token={token}, fichier={pdf.filename}")
 
         pdf_bytes = await pdf.read()
@@ -1208,17 +1212,17 @@ async def send_draft(
         client_email = infos.get("email", "")
         client_nom   = infos.get("nom", "le mandataire")
         adresse      = infos.get("adresse", "")
-        client_link  = f"{SITE_URL}/peb-pulse-token?token={token}"
+        client_link  = f"{SITE_URL}/peb-pulse-token?token={token}" + (f"&bien={unit}" if unit else "")
 
         if client_email:
-            subject   = "Votre PEB provisoire est disponible"
+            subject   = "Votre PEB provisoire est disponible" + (f" — {unit_label}" if unit_label else "")
             body_html = f"""<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
     <div style="background:linear-gradient(135deg,#1B3A8C,#3B82F6);padding:28px 32px;border-radius:12px 12px 0 0;">
         <h1 style="color:#fff;font-size:1.4rem;margin:0;">Votre PEB provisoire est pret</h1>
     </div>
     <div style="background:#fff;padding:28px 32px;border:1px solid #e5e7eb;border-radius:0 0 12px 12px;">
         <p style="color:#374151;">Bonjour <strong>{client_nom}</strong>,</p>
-        <p style="color:#374151;">Votre certificat PEB provisoire pour le bien situe au :</p>
+        <p style="color:#374151;">Votre certificat PEB provisoire{(" (" + unit_label + ")") if unit_label else ""} pour le bien situe au :</p>
         <p style="background:#f4f6fb;padding:12px;border-radius:8px;color:#1B3A8C;font-weight:bold;">{adresse}</p>
         <p style="color:#374151;">est maintenant disponible.</p>
         <div style="text-align:center;margin:28px 0;">
@@ -1241,7 +1245,9 @@ async def send_draft(
 @app.post("/pebepc/dashboard/send_final")
 async def send_final(
     event_id: int = Form(...),
-    pdf: UploadFile = File(...)
+    pdf: UploadFile = File(...),
+    unit: int = Form(0),
+    unit_label: str = Form("")
 ):
     try:
         uid, models = odoo_connect()
@@ -1261,10 +1267,10 @@ async def send_final(
 
         token_ev = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "read", [[event_id]], {"fields": ["x_studio_client_token"]})
         token    = token_ev[0].get("x_studio_client_token", "") if token_ev else ""
-        pdf_link = f"{SITE_URL}/peb-pulse-token?token={token}" if token else ""
+        pdf_link = (f"{SITE_URL}/peb-pulse-token?token={token}" + (f"&bien={unit}" if unit else "")) if token else ""
 
         if client_email:
-            subject   = "Votre certificat PEB definitif est disponible"
+            subject   = "Votre certificat PEB definitif est disponible" + (f" — {unit_label}" if unit_label else "")
             body_html = f"""<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
     <div style="background:linear-gradient(135deg,#059669,#10B981);padding:28px 32px;border-radius:12px 12px 0 0;">
         <h1 style="color:#fff;font-size:1.4rem;margin:0;">Votre certificat PEB definitif est pret</h1>
@@ -1752,6 +1758,37 @@ def _get_event_id_by_token(uid, models, token):
     return events[0]["id"] if events else None
 
 
+_UNIT_RE = re.compile(r"PEB\s+(provisoire|d[ée]finitif)\s*-\s*(Bien|Appartement)\s*(\d+)\s*(?:\((.*)\))?", re.I)
+
+
+@app.get("/pebepc/mission/{token}/units")
+def list_units(token: str):
+    """PDF envoyés bien par bien (ou appartement par appartement) : le plus récent de chaque type."""
+    try:
+        uid, models = odoo_connect()
+        event_id = _get_event_id_by_token(uid, models, token)
+        if not event_id:
+            return {"success": False, "error": "Mission introuvable"}
+        atts = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "ir.attachment", "search_read",
+            [[["res_model", "=", "calendar.event"], ["res_id", "=", event_id], ["mimetype", "=", "application/pdf"]]],
+            {"fields": ["id", "name", "create_date"], "order": "create_date asc", "limit": 300})
+        units = {}
+        for a in atts:
+            m = _UNIT_RE.search(a.get("name") or "")
+            if not m:
+                continue
+            n = int(m.group(3))
+            u = units.setdefault(n, {"n": n, "label": f"{m.group(2).capitalize()} {n}", "detail": "", "prov": None, "def": None})
+            if m.group(4):
+                u["detail"] = m.group(4).strip()
+            kind = "prov" if m.group(1).lower().startswith("prov") else "def"
+            u[kind] = {"id": a["id"], "date": a.get("create_date", "")}
+        return {"success": True, "units": [units[k] for k in sorted(units)]}
+    except Exception as e:
+        logging.error(f"list_units error: {e}")
+        return {"success": False, "error": str(e)}
+
+
 @app.get("/pebepc/mission/{token}/documents")
 def list_documents(token: str):
     try:
@@ -1811,7 +1848,7 @@ async def upload_document(token: str, file: UploadFile = File(...), author: str 
 
 
 @app.get("/pebepc/mission/{token}/documents/{attachment_id}")
-def download_document(token: str, attachment_id: int):
+def download_document(token: str, attachment_id: int, inline: int = 0):
     try:
         uid, models = odoo_connect()
         event_id = _get_event_id_by_token(uid, models, token)
@@ -1830,7 +1867,7 @@ def download_document(token: str, attachment_id: int):
         return Response(
             content=base64.b64decode(raw),
             media_type=a.get("mimetype", "application/octet-stream"),
-            headers={"Content-Disposition": f'attachment; filename="{fname}"',
+            headers={"Content-Disposition": f'{"inline" if inline else "attachment"}; filename="{fname}"',
                      "Access-Control-Allow-Origin": "*"},
         )
     except Exception as e:
