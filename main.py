@@ -1802,6 +1802,11 @@ def list_documents(token: str):
              "order": "create_date desc", "limit": 100})
         docs = []
         for a in atts:
+            nm = (a.get("name") or "").lower()
+            mt = (a.get("mimetype") or "").lower()
+            # Pas les invitations agenda d'Odoo (.ics)
+            if nm.endswith(".ics") or "calendar" in mt:
+                continue
             cu = a.get("create_uid")
             author = cu[1] if (cu and isinstance(cu, list)) else ""
             docs.append({
