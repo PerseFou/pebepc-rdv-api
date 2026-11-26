@@ -3,6 +3,7 @@ import logging
 import secrets
 import re
 import base64
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Form, UploadFile, File, Query, Header
 from datetime import datetime, timedelta, timezone
@@ -23,8 +24,10 @@ mcp_app = mcp.streamable_http_app()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    task = asyncio.create_task(_payment_loop())   # rapport définitif : e-mails « prêt », rappels, envoi au paiement
     async with mcp.session_manager.run():
         yield
+    task.cancel()
 
 
 class MCPAuthMiddleware:
@@ -1285,6 +1288,7 @@ async def send_final(
     </div>
 </div>"""
             send_odoo_mail(uid, models, client_email, subject, body_html)
+            _pp_mark(uid, models, event_id, "paye", "Rapport définitif envoyé au client.")
 
         return {"success": True, "mail_sent": bool(client_email)}
 
@@ -1322,10 +1326,12 @@ def get_pdf_definitif(token: str):
         uid, models = odoo_connect()
         events = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "search_read",
             [[["x_studio_client_token", "=", token], ["active", "=", True]]],
-            {"fields": ["id", "name", "x_studio_pdf_definitif"], "limit": 1})
+            {"fields": ["id", "name", "x_studio_pdf_definitif", "x_studio_facture_liee"], "limit": 1})
         if not events:
             return Response(content=b"Mission introuvable", status_code=404)
         ev      = events[0]
+        if not _pp_paid(uid, models, ev)["paid"]:
+            return _pp_locked_page(token)
         pdf_b64 = ev.get("x_studio_pdf_definitif")
         if not pdf_b64:
             return Response(content="Aucun PDF definitif disponible".encode(), status_code=404)
@@ -1783,7 +1789,10 @@ def list_units(token: str):
                 u["detail"] = m.group(4).strip()
             kind = "prov" if m.group(1).lower().startswith("prov") else "def"
             u[kind] = {"id": a["id"], "date": a.get("create_date", "")}
-        return {"success": True, "units": [units[k] for k in sorted(units)]}
+        ev = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "read", [[event_id]], {"fields": ["x_studio_facture_liee"]})
+        pay = _pp_paid(uid, models, ev[0]) if ev else {"paid": True, "url": "", "amount": 0}
+        return {"success": True, "units": [units[k] for k in sorted(units)],
+                "final_paid": pay["paid"], "pay_url": pay["url"], "amount_due": pay["amount"]}
     except Exception as e:
         logging.error(f"list_units error: {e}")
         return {"success": False, "error": str(e)}
@@ -1865,6 +1874,10 @@ def download_document(token: str, attachment_id: int, inline: int = 0):
         if not atts:
             return Response(content=b"Document introuvable", status_code=404)
         a = atts[0]
+        if re.search(r"d[ée]finitif", a.get("name") or "", re.I):
+            ev = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "read", [[event_id]], {"fields": ["x_studio_facture_liee"]})
+            if ev and not _pp_paid(uid, models, ev[0])["paid"]:
+                return _pp_locked_page(token)
         raw = a.get("datas")
         if not raw:
             return Response(content=b"Document vide", status_code=404)
@@ -2047,5 +2060,204 @@ def hub_login(token: str = Query(...)):
 
 
 # ── MCP (monté en dernier pour ne pas intercepter les routes ci-dessus) ──
+
+# ══ RAPPORT DÉFINITIF : DISPONIBLE APRÈS PAIEMENT ═══════════════════════════
+# Toutes les heures : missions clôturées avec PDF définitif et facture liée.
+#  - non payée : e-mail « rapport prêt, disponible après paiement » (une fois), puis
+#    3 rappels maximum, un tous les 5 jours ouvrables (copie à Charlotte), puis alerte à Charlotte ;
+#  - payée (après l'e-mail « prêt ») : e-mail « votre rapport est disponible ».
+# Le suivi est noté dans l'historique de la mission avec des repères [pp:...].
+PP_MAX_RAPPELS = 3
+PP_JOURS_OUVRABLES = 5
+PP_CC = "charlotte@pebpulse.be"
+PP_RECUL_JOURS = 120   # dossiers clôturés pris en compte (RDV des 120 derniers jours)
+
+
+def _pp_now():
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("Europe/Brussels"))
+    except Exception:
+        return datetime.now(timezone.utc) + timedelta(hours=1)
+
+
+def _pp_jours_ouvrables(depuis, jusqua):
+    """Nombre de jours ouvrables (lun.–ven.) après `depuis`, jusqu'à `jusqua` inclus (dates)."""
+    n, d = 0, depuis
+    while d < jusqua:
+        d += timedelta(days=1)
+        if d.weekday() < 5:
+            n += 1
+    return n
+
+
+def _pp_paid(uid, models, ev):
+    """État de la facture liée : payée ?, lien de paiement (portail) et montant dû."""
+    link = ev.get("x_studio_facture_liee")
+    if not (isinstance(link, (list, tuple)) and link):
+        return {"paid": True, "url": "", "amount": 0, "posted": False, "none": True}
+    inv = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "account.move", "read", [[link[0]]],
+        {"fields": ["id", "state", "payment_state", "amount_residual", "access_url", "access_token"]})
+    if not inv or inv[0].get("state") == "cancel":
+        return {"paid": True, "url": "", "amount": 0, "posted": False, "none": True}
+    inv = inv[0]
+    paid = inv.get("payment_state") in ("paid", "in_payment", "reversed")
+    url = ""
+    if inv.get("state") == "posted" and inv.get("access_url"):
+        tok = inv.get("access_token")
+        if not tok:
+            tok = secrets.token_urlsafe(24)
+            try:
+                models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "account.move", "write", [[inv["id"]], {"access_token": tok}])
+            except Exception as e:
+                logging.warning(f"access_token facture {inv['id']}: {e}")
+                tok = ""
+        url = f"{SITE_URL}{inv['access_url']}" + (f"?access_token={tok}" if tok else "")
+    return {"paid": paid, "url": url, "amount": float(inv.get("amount_residual") or 0.0),
+            "posted": inv.get("state") == "posted", "none": False}
+
+
+def _pp_locked_page(token):
+    return HTMLResponse(status_code=402, content=f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Rapport disponible après paiement</title></head>
+<body style="font-family:Arial,sans-serif;background:#f4f6fb;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;">
+<div style="background:#fff;border-radius:16px;padding:32px;max-width:460px;text-align:center;box-shadow:0 8px 30px rgba(28,80,142,.12);">
+<div style="font-size:2.2rem;">🔒</div><h2 style="color:#1C508E;">Votre rapport définitif est prêt</h2>
+<p style="color:#475569;">Il sera disponible au téléchargement dès réception du paiement de votre facture.</p>
+<a href="{SITE_URL}/peb-pulse-token?token={token}" style="display:inline-block;margin-top:12px;background:#1C508E;color:#fff;padding:12px 20px;border-radius:10px;text-decoration:none;font-weight:bold;">Retour à mon dossier</a>
+</div></body></html>""")
+
+
+def _pp_mark(uid, models, event_id, tag, texte):
+    try:
+        models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "message_post", [[event_id]],
+            {"body": f"{texte} [pp:{tag}]", "message_type": "comment", "subtype_xmlid": "mail.mt_note"})
+    except Exception as e:
+        logging.warning(f"_pp_mark {event_id} {tag}: {e}")
+
+
+def _pp_mail_html(titre, couleur, client_nom, adresse, lignes, bouton_url="", bouton_txt=""):
+    btn = (f"<div style='text-align:center;margin:26px 0;'><a href='{bouton_url}' style='background:{couleur};color:#fff;"
+           f"padding:14px 22px;border-radius:12px;text-decoration:none;font-weight:bold;display:inline-block;'>{bouton_txt}</a></div>") if bouton_url else ""
+    corps = "".join(f"<p style='color:#374151;'>{l}</p>" for l in lignes)
+    return f"""<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+    <div style="background:{couleur};padding:26px 32px;border-radius:12px 12px 0 0;"><h1 style="color:#fff;font-size:1.3rem;margin:0;">{titre}</h1></div>
+    <div style="background:#fff;padding:26px 32px;border:1px solid #e5e7eb;border-radius:0 0 12px 12px;">
+        <p style="color:#374151;">Bonjour <strong>{client_nom}</strong>,</p>
+        <p style="background:#f0f4ff;padding:12px;border-radius:8px;color:#1C508E;font-weight:bold;">{adresse}</p>
+        {corps}{btn}
+        <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;"/>{SIGNATURE_HTML}
+    </div></div>"""
+
+
+def _pp_process(uid, models, ev, marks, now, envoi_ok):
+    """Traite une mission clôturée. marks : {tag: date}. envoi_ok : heures ouvrables pour les e-mails « prêt » / rappels."""
+    eid, token = ev["id"], ev.get("x_studio_client_token") or ""
+    pay = _pp_paid(uid, models, ev)
+    if pay["none"]:
+        return
+    info = get_mission_info(uid, models, eid) or {}
+    m = EMAIL_RE.search(info.get("email") or "") or EMAIL_RE.search(ev.get("x_studio_informations_sur_le_bien") or "")
+    email = m.group(0).lower() if m else ""
+    if not email:
+        return
+    nom, adresse = info.get("nom") or "", info.get("adresse") or ""
+    dossier = f"{SITE_URL}/peb-pulse-token?token={token}" if token else ""
+    montant = f"{pay['amount']:.2f} €".replace(".", ",")
+
+    if pay["paid"]:
+        if "pret" in marks and "paye" not in marks:
+            send_odoo_mail(uid, models, email, "Votre rapport PEB définitif est disponible",
+                _pp_mail_html("Votre rapport PEB définitif est disponible", "#10B981", nom, adresse,
+                    ["Merci pour votre paiement. Votre rapport PEB <strong>définitif</strong> est maintenant disponible."],
+                    dossier, "Télécharger mon rapport définitif"))
+            _pp_mark(uid, models, eid, "paye", "Facture payée : rapport définitif envoyé au client.")
+        return
+
+    if not envoi_ok:
+        return
+    if "pret" not in marks:
+        send_odoo_mail(uid, models, email, "Votre rapport PEB définitif est prêt",
+            _pp_mail_html("Votre rapport PEB définitif est prêt", "#1C508E", nom, adresse,
+                ["Votre rapport PEB <strong>définitif</strong> est prêt.",
+                 f"Il sera disponible au téléchargement dès réception du paiement de votre facture ({montant})."],
+                pay["url"] or dossier, "Payer ma facture" if pay["url"] else "Voir mon dossier"))
+        _pp_mark(uid, models, eid, "pret", f"Rapport définitif prêt : e-mail envoyé au client, en attente du paiement ({montant}).")
+        return
+
+    rappels = sorted(int(t.split(":")[1]) for t in marks if t.startswith("rappel:"))
+    n = rappels[-1] if rappels else 0
+    dernier = marks.get(f"rappel:{n}") if n else marks.get("pret")
+    if not dernier or _pp_jours_ouvrables(dernier, now.date()) < PP_JOURS_OUVRABLES:
+        return
+    if n < PP_MAX_RAPPELS:
+        k = n + 1
+        html = _pp_mail_html(f"Rappel : votre rapport PEB définitif vous attend", "#ED6C23", nom, adresse,
+            [f"Votre rapport PEB <strong>définitif</strong> est prêt, mais nous n'avons pas encore reçu le paiement de votre facture ({montant}).",
+             "Il sera disponible au téléchargement dès réception du paiement."],
+            pay["url"] or dossier, "Payer ma facture" if pay["url"] else "Voir mon dossier")
+        send_odoo_mail(uid, models, email, f"Rappel : votre rapport PEB définitif vous attend ({k}/{PP_MAX_RAPPELS})", html)
+        send_odoo_mail(uid, models, PP_CC, f"[Copie] Rappel {k}/{PP_MAX_RAPPELS} envoyé à {nom or email} — {adresse}", html)
+        _pp_mark(uid, models, eid, f"rappel:{k}", f"Rappel de paiement {k}/{PP_MAX_RAPPELS} envoyé au client ({montant}).")
+    elif "alerte" not in marks:
+        send_odoo_mail(uid, models, PP_CC, f"À relancer : {nom or email} n'a pas payé après {PP_MAX_RAPPELS} rappels",
+            _pp_mail_html("Facture toujours impayée", "#EF4444", "Charlotte", adresse,
+                [f"{nom or email} ({email}) n'a pas payé sa facture ({montant}) après {PP_MAX_RAPPELS} rappels automatiques.",
+                 "Les rappels automatiques sont terminés : à relancer manuellement."], pay["url"], "Voir la facture"))
+        _pp_mark(uid, models, eid, "alerte", f"{PP_MAX_RAPPELS} rappels sans paiement : alerte envoyée à Charlotte.")
+
+
+def run_payment_job(event_ids=None, force=False):
+    try:
+        uid, models = odoo_connect()
+        now = _pp_now()
+        envoi_ok = force or (now.weekday() < 5 and 8 <= now.hour < 19)
+        dom = [["active", "=", True], ["x_studio_statut_draft", "=", "closed"],
+               ["x_studio_pdf_definitif", "!=", False], ["x_studio_facture_liee", "!=", False]]
+        if event_ids:
+            dom.append(["id", "in", list(event_ids)])
+        else:
+            dom.append(["start", ">=", (datetime.now(timezone.utc) - timedelta(days=PP_RECUL_JOURS)).strftime("%Y-%m-%d %H:%M:%S")])
+        evs = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "search_read", [dom],
+            {"fields": ["id", "x_studio_facture_liee", "x_studio_client_token", "x_studio_informations_sur_le_bien"], "limit": 500})
+        if not evs:
+            return 0
+        msgs = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "mail.message", "search_read",
+            [[["model", "=", "calendar.event"], ["res_id", "in", [e["id"] for e in evs]], ["body", "ilike", "[pp:"]]],
+            {"fields": ["res_id", "body", "date"], "limit": 5000})
+        marks = {}
+        for mm in msgs:
+            for tag in re.findall(r"\[pp:([a-z]+(?::\d+)?)\]", mm.get("body") or ""):
+                d = datetime.strptime(mm["date"][:10], "%Y-%m-%d").date()
+                cur = marks.setdefault(mm["res_id"], {})
+                if tag not in cur or d > cur[tag]:
+                    cur[tag] = d
+        for ev in evs:
+            try:
+                _pp_process(uid, models, ev, marks.get(ev["id"], {}), now, envoi_ok)
+            except Exception as e:
+                logging.error(f"payment_job mission {ev['id']}: {e}")
+        return len(evs)
+    except Exception as e:
+        logging.error(f"payment_job: {e}")
+        return -1
+
+
+async def _payment_loop():
+    await asyncio.sleep(90)
+    while True:
+        try:
+            n = await asyncio.to_thread(run_payment_job)
+            logging.info(f"payment_job : {n} mission(s) clôturée(s) vérifiée(s)")
+        except Exception as e:
+            logging.error(f"payment_loop: {e}")
+        await asyncio.sleep(3600)
+
+
+@app.post("/pebepc/dashboard/final_check")
+def final_check(event_id: int = Form(...)):
+    """Appelé par le dashboard juste après le dépôt d'un définitif : e-mail « prêt » ou « disponible » tout de suite."""
+    n = run_payment_job([event_id], force=True)
+    return {"success": n >= 0}
+
 
 app.mount("/", mcp_app)
