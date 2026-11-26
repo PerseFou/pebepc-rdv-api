@@ -1217,6 +1217,7 @@ async def send_draft(
         adresse      = infos.get("adresse", "")
         client_link  = f"{SITE_URL}/peb-pulse-token?token={token}" + (f"&bien={unit}" if unit else "")
 
+        _hist(uid, models, event_id, "draft_sent", "📤 Rapport provisoire envoyé au client" + (f" ({unit_label})" if unit_label else "") + ("" if client_email else " (pas d'e-mail client trouvé)"))
         if client_email:
             subject   = "Votre PEB provisoire est disponible" + (f" — {unit_label}" if unit_label else "")
             body_html = f"""<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
@@ -1288,7 +1289,7 @@ async def send_final(
     </div>
 </div>"""
             send_odoo_mail(uid, models, client_email, subject, body_html)
-            _pp_mark(uid, models, event_id, "paye", "Rapport définitif envoyé au client.")
+            _pp_mark(uid, models, event_id, "paye", "📤 Rapport définitif envoyé au client" + (f" ({unit_label})" if unit_label else "") + ".")
 
         return {"success": True, "mail_sent": bool(client_email)}
 
@@ -1418,6 +1419,7 @@ def accept_mission(token: str):
     </div>
 </div>"""
         send_odoo_mail(uid, models, ODOO_USER, subject, body_html)
+        _hist(uid, models, event_id, "accepted", "✅ Rapport provisoire validé par le client")
         logging.info(f"Mission {event_id} acceptee")
         return {"success": True}
     except Exception as e:
@@ -1462,6 +1464,7 @@ def refuse_mission(token: str, req: RefuseRequest):
     </div>
 </div>"""
         send_odoo_mail(uid, models, ODOO_USER, subject, body_html)
+        _hist(uid, models, event_id, "refused", "❌ Rapport provisoire refusé par le client — remarques : " + (req.remarques or "aucune"))
         logging.info(f"Mission {event_id} refusee")
         return {"success": True}
     except Exception as e:
@@ -2138,6 +2141,15 @@ def _pp_mark(uid, models, event_id, tag, texte):
             {"body": f"{texte} [pp:{tag}]", "message_type": "comment", "subtype_xmlid": "mail.mt_note"})
     except Exception as e:
         logging.warning(f"_pp_mark {event_id} {tag}: {e}")
+
+
+def _hist(uid, models, event_id, tag, texte):
+    """Journal de la mission (affiché dans l'historique du dashboard)."""
+    try:
+        models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "message_post", [[event_id]],
+            {"body": f"{texte} [hist:{tag}]", "message_type": "comment", "subtype_xmlid": "mail.mt_note"})
+    except Exception as e:
+        logging.warning(f"_hist {event_id} {tag}: {e}")
 
 
 def _pp_mail_html(titre, couleur, client_nom, adresse, lignes, bouton_url="", bouton_txt=""):
