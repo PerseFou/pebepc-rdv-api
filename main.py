@@ -1810,11 +1810,16 @@ def list_documents(token: str):
             {"fields": ["id", "name", "mimetype", "file_size", "create_date", "create_uid"],
              "order": "create_date desc", "limit": 100})
         docs = []
+        ev = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "read", [[event_id]], {"fields": ["x_studio_facture_liee"]})
+        final_locked = bool(ev) and not _pp_paid(uid, models, ev[0])["paid"]
         for a in atts:
             nm = (a.get("name") or "").lower()
             mt = (a.get("mimetype") or "").lower()
             # Pas les invitations agenda d'Odoo (.ics)
             if nm.endswith(".ics") or "calendar" in mt:
+                continue
+            # Rapport définitif masqué tant que la facture n'est pas payée
+            if final_locked and re.search(r"d[ée]finitif", nm):
                 continue
             cu = a.get("create_uid")
             author = cu[1] if (cu and isinstance(cu, list)) else ""
