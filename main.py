@@ -313,39 +313,49 @@ def _region_from_cp(cp):
     return "flandre"
 
 
+ATTRIB_MARGE_MIN = 15   # minutes de déplacement autour d'un RDV pour juger une experte libre
+
+
+def _expert_load(uid, models, u_id, partner_id, start, stop):
+    """Nombre de RDV / congés de l'experte (organisatrice ou participante) qui chevauchent [start, stop]."""
+    dom = [["start", "<", stop], ["stop", ">", start], ["active", "=", True]]
+    if partner_id:
+        dom += ["|", ["user_id", "=", u_id], ["partner_ids", "in", [partner_id]]]
+    else:
+        dom += [["user_id", "=", u_id]]
+    return models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "search_count", [dom])
+
+
 def _pick_expert(uid, models, experts, req):
-    """Experte pour le RDV : celle du formulaire (expert_id), sinon une experte libre sur le créneau.
-    Retourne un user_id ou None (à attribuer)."""
+    """Experte pour le RDV (reprend l'ancienne action Odoo 781) :
+    1. celle du formulaire (expert_id) si elle est indiquée ;
+    2. sinon les expertes compatibles (active, région, type de bien, période de disponibilité, pas en congé) ;
+    3. parmi elles, les libres sur le créneau (marge de déplacement comprise) ;
+    4. la moins chargée ce jour-là puis cette semaine ; égalité : alternance ;
+    5. aucune libre : la compatible la moins chargée, avec une note « à vérifier ».
+    Retourne (user_id ou None, note pour l'historique du RDV)."""
     if req.expert_id:
         for u_id, e in experts.items():
             if req.expert_id in (u_id, e["partner_id"]):
-                return u_id
+                return u_id, f"Experte choisie dans le formulaire : {e['name']}."
         logging.warning(f"submit_rdv: expert_id {req.expert_id} inconnu, attribution automatique")
     if not experts:
-        return None
+        return None, "⚠ Attribution impossible : aucune experte trouvée dans Odoo."
     day = (req.start_utc or "")[:10]
     region = _region_from_cp(req.cp)
     type_bien = (req.type_bien or "").lower()
-    # Occupées : RDV ou congé (INDISPO) qui chevauche le créneau
-    busy = set()
-    try:
-        evs = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "search_read",
-            [[["start", "<", req.stop_utc], ["stop", ">", req.start_utc], ["active", "=", True],
-              ["user_id", "in", list(experts)]]],
-            {"fields": ["user_id"], "limit": 500})
-        busy = {e["user_id"][0] for e in evs or [] if e.get("user_id")}
-    except Exception as e:
-        logging.warning(f"_pick_expert occupation: {e}")
+    detail = f"région : {region or 'inconnue'}, bien : {req.type_bien or 'inconnu'}"
+
     blocked = set()
     try:
         blocked = set(_blocked_days_by_expert(uid, models, day).get("off", []))
     except Exception as e:
         logging.warning(f"_pick_expert conges: {e}")
 
-    candidates = []
+    compatibles = []
     for u_id, e in experts.items():
         c = e["cfg"]
-        if c.get("active", True) is False or u_id in busy or u_id in blocked:
+        if c.get("active", True) is False or u_id in blocked:
             continue
         if c.get("start") and day < c["start"]:
             continue
@@ -357,16 +367,44 @@ def _pick_expert(uid, models, experts, req):
         types = [str(t).lower() for t in (c.get("biens") or c.get("types") or [])]
         if types and type_bien and not any(t in type_bien for t in types):
             continue
-        prio = c.get("priority", c.get("priorite", 99))
+        compatibles.append(u_id)
+    note_compat = ""
+    if not compatibles:
+        compatibles = list(experts)
+        note_compat = f"⚠ Aucune experte ne couvre ce RDV ({detail}) d'après l'onglet Expertes. "
+
+    fmt = "%Y-%m-%d %H:%M:%S"
+    try:
+        start = datetime.strptime(req.start_utc[:19], fmt)
+        stop = datetime.strptime(req.stop_utc[:19], fmt)
+    except Exception:
+        return None, "⚠ Attribution impossible : horaire du RDV illisible."
+    marge = timedelta(minutes=ATTRIB_MARGE_MIN)
+    jour = start.replace(hour=0, minute=0, second=0)
+    lundi = jour - timedelta(days=jour.weekday())
+    ordre = sorted(experts)
+    alternance = int(start.timestamp() // 60)   # change à chaque RDV : pas de priorité fixe
+
+    def load(u_id, a, b):
         try:
-            prio = float(prio)
-        except (TypeError, ValueError):
-            prio = 99
-        candidates.append((prio, e["name"], u_id))
-    if not candidates:
-        logging.info(f"_pick_expert: aucune experte libre le {req.start_utc}")
-        return None
-    return sorted(candidates)[0][2]
+            return _expert_load(uid, models, u_id, experts[u_id]["partner_id"], a.strftime(fmt), b.strftime(fmt))
+        except Exception as e:
+            logging.warning(f"_pick_expert charge {u_id}: {e}")
+            return 0
+
+    libres = [u for u in compatibles if not load(u, start - marge, stop + marge)]
+
+    def charge(u_id):
+        return (load(u_id, jour, jour + timedelta(days=1)),
+                load(u_id, lundi, lundi + timedelta(days=7)),
+                (ordre.index(u_id) + alternance) % len(ordre))
+
+    choisie = sorted(libres or compatibles, key=charge)[0]
+    nom = experts[choisie]["name"]
+    if libres:
+        noms = ", ".join(experts[u]["name"] for u in libres)
+        return choisie, f"{note_compat}Experte attribuée automatiquement : {nom} ({detail} ; libres et compatibles : {noms})."
+    return choisie, f"{note_compat}⚠ Aucune experte compatible libre sur ce créneau ({detail}) : RDV attribué à {nom}, à vérifier."
 
 
 def _blocked_days_by_expert(uid, models, day):
@@ -651,6 +689,17 @@ def nearby_slots(req: NearbySlotsRequest):
     return {"ok": True, "client_found": True, "slots": slots}
 
 
+def _attrib_note(models, uid, event_id, note):
+    """Note d'attribution de l'experte dans l'historique du RDV."""
+    if not (event_id and note):
+        return
+    try:
+        models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "message_post", [[event_id]],
+            {"body": note, "message_type": "comment", "subtype_xmlid": "mail.mt_note"})
+    except Exception as e:
+        logging.warning(f"_attrib_note {event_id}: {e}")
+
+
 def _write_partenaire(models, uid, event_id, partenaire):
     if not (event_id and partenaire):
         return
@@ -786,10 +835,10 @@ def submit_rdv(req: SubmitRequest):
             logging.warning(f"Client facture: {e}")
 
         # Experte qui réalise la visite (jamais le compte technique qui crée l'événement)
-        experts, expert_user_id = {}, None
+        experts, expert_user_id, attrib_note = {}, None, ""
         try:
             experts = _load_experts(uid, models)
-            expert_user_id = _pick_expert(uid, models, experts, req)
+            expert_user_id, attrib_note = _pick_expert(uid, models, experts, req)
         except Exception as e:
             logging.warning(f"Attribution experte: {e}")
         expert_partner_id = experts[expert_user_id]["partner_id"] if expert_user_id else None
@@ -915,6 +964,7 @@ def submit_rdv(req: SubmitRequest):
                 models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "write", [[event_id], vals])
                 _write_partenaire(models, uid, event_id, partenaire)
                 _write_sur_place(models, uid, event_id, req)
+                _attrib_note(models, uid, event_id, attrib_note)
             except Exception as e:
                 logging.warning(f"Event certificat electrique: {e}")
 
@@ -952,6 +1002,7 @@ def submit_rdv(req: SubmitRequest):
 
         _write_partenaire(models, uid, event_id, partenaire)
         _write_sur_place(models, uid, event_id, req)
+        _attrib_note(models, uid, event_id, attrib_note)
 
         if invoice_id:
             try:
