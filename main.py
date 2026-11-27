@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, JSONResponse, HTMLResponse, RedirectResponse
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 
 from odoo_client import odoo_connect, get_mission_info, ODOO_DB, ODOO_USER, ODOO_PASSWORD, EXPERT_NAME, SENDER_NAME, SENDER_EMAIL, SENDER_TITLE, SITE_URL
 from mcp_server import mcp
@@ -1822,7 +1822,7 @@ def list_documents(token: str):
             if nm.endswith(".ics") or "calendar" in mt:
                 continue
             # Rapport définitif masqué tant que la facture n'est pas payée
-            if final_locked and re.search(r"d[ée]finitif", nm):
+            if final_locked and re.match(r"\s*peb\s+d[ée]finitif", nm):
                 continue
             cu = a.get("create_uid")
             author = cu[1] if (cu and isinstance(cu, list)) else ""
@@ -1882,7 +1882,7 @@ def download_document(token: str, attachment_id: int, inline: int = 0):
         if not atts:
             return Response(content=b"Document introuvable", status_code=404)
         a = atts[0]
-        if re.search(r"d[ée]finitif", a.get("name") or "", re.I):
+        if re.match(r"\s*peb\s+d[ée]finitif", a.get("name") or "", re.I):
             ev = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "read", [[event_id]], {"fields": ["x_studio_facture_liee"]})
             if ev and not _pp_paid(uid, models, ev[0])["paid"]:
                 return _pp_locked_page(token)
@@ -2275,6 +2275,87 @@ def final_check(event_id: int = Form(...)):
     """Appelé par le dashboard juste après le dépôt d'un définitif : e-mail « prêt » ou « disponible » tout de suite."""
     n = run_payment_job([event_id], force=True)
     return {"success": n >= 0}
+
+
+# ══ RENVOI DU LIEN PROVISOIRE / DÉPÔT DU CONTRÔLE ÉLECTRIQUE ═════════════════
+def _ensure_token(uid, models, event_id):
+    cur = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "read", [[event_id]], {"fields": ["x_studio_client_token"]})
+    token = (cur[0].get("x_studio_client_token") if cur else "") or ""
+    if not token:
+        token = secrets.token_urlsafe(24)
+        models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "write", [[event_id], {"x_studio_client_token": token}])
+    return token
+
+
+def _client_email(uid, models, event_id, infos):
+    m = EMAIL_RE.search(infos.get("email") or "")
+    if not m:
+        ev = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "calendar.event", "read", [[event_id]], {"fields": ["x_studio_informations_sur_le_bien"]})
+        m = EMAIL_RE.search((ev[0].get("x_studio_informations_sur_le_bien") or "") if ev else "")
+    return m.group(0).lower() if m else ""
+
+
+@app.post("/pebepc/dashboard/resend_draft")
+def resend_draft(event_id: int = Form(...), unit: int = Form(0), unit_label: str = Form("")):
+    """Renvoie au client l'e-mail « PEB provisoire disponible » (sans changer le PDF)."""
+    try:
+        uid, models = odoo_connect()
+        token = _ensure_token(uid, models, event_id)
+        infos = get_mission_info(uid, models, event_id) or {}
+        email = _client_email(uid, models, event_id, infos)
+        if not email:
+            return {"success": False, "error": "Aucun e-mail client trouvé"}
+        link = f"{SITE_URL}/peb-pulse-token?token={token}" + (f"&bien={unit}" if unit else "")
+        suffix = f" ({unit_label})" if unit_label else ""
+        send_odoo_mail(uid, models, email, "Votre PEB provisoire est disponible" + (f" — {unit_label}" if unit_label else ""),
+            _pp_mail_html("Votre PEB provisoire est disponible", "#1C508E", infos.get("nom") or "", infos.get("adresse") or "",
+                [f"Votre certificat PEB provisoire{suffix} est disponible : merci de le consulter et de le valider (ou de nous indiquer vos remarques)."],
+                link, "Consulter mon PEB provisoire"))
+        _hist(uid, models, event_id, "draft_resent", f"✉️ Lien du rapport provisoire renvoyé au client{suffix} ({email})")
+        return {"success": True, "email": email}
+    except Exception as e:
+        logging.error(f"resend_draft error: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/pebepc/dashboard/send_elec")
+async def send_elec(event_id: int = Form(...), files: List[UploadFile] = File(...), notify: int = Form(1)):
+    """Dépose un ou plusieurs documents du contrôle électrique (ex. version FR et NL) et prévient le client."""
+    try:
+        uid, models = odoo_connect()
+        token = _ensure_token(uid, models, event_id)
+        noms = []
+        for f in files:
+            data = await f.read()
+            if not data:
+                continue
+            nom = f"Contrôle électrique - {f.filename or 'document.pdf'}"
+            models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "ir.attachment", "create", [{
+                "name": nom, "datas": base64.b64encode(data).decode("utf-8"),
+                "res_model": "calendar.event", "res_id": event_id,
+                "mimetype": f.content_type or "application/pdf",
+                "description": "Contrôle électrique déposé depuis le dashboard"}])
+            noms.append(f.filename or "document")
+        if not noms:
+            return {"success": False, "error": "Aucun fichier reçu"}
+        email = ""
+        if notify:
+            infos = get_mission_info(uid, models, event_id) or {}
+            email = _client_email(uid, models, event_id, infos)
+            if email:
+                link = f"{SITE_URL}/peb-pulse-token?token={token}"
+                liste = "".join(f"<li>{n}</li>" for n in noms)
+                send_odoo_mail(uid, models, email, "Votre rapport de contrôle électrique est disponible",
+                    _pp_mail_html("Votre rapport de contrôle électrique est disponible", "#ED6C23", infos.get("nom") or "", infos.get("adresse") or "",
+                        ["Le rapport de votre contrôle de l'installation électrique est disponible :",
+                         f"<ul style='margin:0;padding-left:18px;'>{liste}</ul>",
+                         "Vous le retrouvez dans la rubrique « Vos documents » de votre dossier."],
+                        link, "Voir mes documents"))
+        _hist(uid, models, event_id, "elec_sent", f"⚡ Contrôle électrique déposé ({', '.join(noms)})" + (f" et envoyé au client ({email})" if email else (" — client non prévenu" if not notify else " — aucun e-mail client trouvé")))
+        return {"success": True, "files": noms, "email": email}
+    except Exception as e:
+        logging.error(f"send_elec error: {e}")
+        return {"success": False, "error": str(e)}
 
 
 app.mount("/", mcp_app)
